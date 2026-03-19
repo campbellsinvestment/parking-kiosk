@@ -1,0 +1,373 @@
+================================================================
+PARKING KIOSK MANAGEMENT SYSTEM
+Pseudocode
+Document: PKS-PSEUDO-001
+Version: 1.0
+Status: Draft
+================================================================
+
+
+----------------------------------------------------------------
+SECTION 1 - SYSTEM STARTUP
+----------------------------------------------------------------
+
+WHEN the kiosk application starts
+    Connect to the database
+    IF database connection fails
+        Log error ERR-008
+        Display "Kiosk is out of service. Please pay inside."
+        Raise the gate bar as fail-safe
+        Alert staff on admin dashboard
+        STOP
+
+    Connect to the payment gateway
+    IF payment gateway is unreachable
+        Log error ERR-005
+        Flag payment system as offline
+        Continue startup but mark kiosk in limited mode
+
+    Check ticket paper level
+    IF paper is empty
+        Log error ERR-001
+        Flag printer as unavailable
+        Alert staff on admin dashboard
+
+    Check receipt paper level
+    IF receipt paper is empty
+        Log error ERR-006
+        Flag receipt printer as unavailable
+        Alert staff on admin dashboard
+
+    Set gate bar to CLOSED
+    Set kiosk status to READY
+    Display welcome screen to patron
+
+
+----------------------------------------------------------------
+SECTION 2 - ENTRY FLOW
+----------------------------------------------------------------
+
+WHEN patron presses the ENTRY button
+
+    IF printer is flagged as unavailable
+        Log error ERR-001
+        Display "Paper unavailable. Please proceed inside to pay."
+        Raise the gate bar
+        Alert staff
+        END this flow
+
+    Generate a unique ticket ID using UUID
+    Record the entry timestamp in UTC
+    Save the ticket to the database with status ACTIVE
+
+    Encode the ticket ID and entry timestamp into a QR code
+
+    Send the QR code to the printer
+    Print the ticket
+
+    IF printing fails
+        Log error ERR-001
+        Display "Paper unavailable. Please proceed inside to pay."
+        Raise the gate bar
+        Mark the ticket as VOID in the database
+        Alert staff
+        END this flow
+
+    Dispense the ticket to the patron
+    Display "Welcome. Please take your ticket."
+
+    Send signal to raise the entry gate bar
+    Wait for vehicle to pass
+    Send signal to lower the entry gate bar
+
+    Log successful entry event with ticket ID and timestamp
+
+
+----------------------------------------------------------------
+SECTION 3 - EXIT FLOW
+----------------------------------------------------------------
+
+WHEN vehicle arrives at exit kiosk
+
+    Display "Please scan your ticket."
+    Activate the QR code scanner
+
+    Wait for patron to scan ticket
+
+    IF no scan detected within 60 seconds
+        Display "Please scan your ticket or press HELP."
+        Wait another 30 seconds
+        IF still no scan
+            Alert staff
+            END this flow
+
+    Read the QR code from the scanner
+
+    IF QR code cannot be read
+        Attempt to read again
+        Attempt to read a third time
+        IF all 3 attempts fail
+            Log error ERR-002
+            Display "Unable to read ticket. Please press HELP or proceed inside."
+            Alert staff
+            END this flow
+
+    Extract the ticket ID from the QR code
+    Look up the ticket ID in the database
+
+    IF ticket is not found in the database
+        Log error ERR-003
+        Display "Invalid ticket. Please see staff at the booth."
+        Do NOT raise the gate
+        END this flow
+
+    IF ticket status is already PAID
+        Display "This ticket has already been paid."
+        Do NOT raise the gate
+        END this flow
+
+    Record the exit timestamp in UTC
+
+    CALCULATE PARKING DURATION
+        duration = exit timestamp minus entry timestamp
+        Round duration up to the next full minute
+
+    CALCULATE BASE FEE
+        IF duration is 30 minutes or less
+            base fee = 0.00
+        ELSE IF duration is 31 to 60 minutes
+            base fee = 2.00
+        ELSE IF duration is 61 to 120 minutes
+            base fee = 4.00
+        ELSE
+            additional hours = duration minus 120 minutes rounded up to next hour
+            base fee = 4.00 plus (additional hours multiplied by 2.00)
+
+    CALCULATE TAX
+        Retrieve tax rate from admin settings
+        tax amount = base fee multiplied by tax rate
+
+    CALCULATE TOTAL
+        total due = base fee plus tax amount
+
+    IF total due is 0.00
+        Display "No charge. Have a good day."
+        Raise the exit gate bar
+        Log exit event with ticket ID
+        Mark ticket as PAID in the database
+        END this flow
+
+    Display itemized summary to patron
+        Show duration
+        Show base fee
+        Show tax amount
+        Show total due
+
+
+----------------------------------------------------------------
+SECTION 4 - PAYMENT FLOW
+----------------------------------------------------------------
+
+WHEN total due is greater than 0.00
+
+    IF payment gateway is flagged as offline
+        Log error ERR-005
+        Display "Payment system offline. Gate is open. Please pay inside."
+        Raise the gate bar
+        Alert staff
+        END this flow
+
+    Display "Please insert, swipe, or tap your card."
+    Activate the card terminal
+    Wait for card input
+
+    Send payment request to payment gateway
+        Include total amount
+        Include ticket ID as reference
+
+    Wait for response from payment gateway
+
+    IF no response within 10 seconds
+        Log error ERR-005
+        Display "Connection issue. Please try again or proceed inside."
+        Raise the gate bar
+        Alert staff
+        END this flow
+
+    IF payment gateway returns APPROVED
+        Mark ticket as PAID in the database
+        Record transaction with status PAID, amount, timestamp, and ticket ID
+        Display "Payment approved. Thank you."
+
+        Print receipt
+            IF receipt printer is unavailable
+                Log error ERR-006
+                Display "Payment accepted. Receipt unavailable. Thank you."
+            ELSE
+                Print receipt with ticket ID, duration, base fee, tax, total, and timestamp
+                Dispense receipt to patron
+
+        Raise the exit gate bar
+        Wait for vehicle to pass
+        Lower the exit gate bar
+        Log successful exit event
+
+    IF payment gateway returns DECLINED
+        Increment retry counter
+
+        IF retry counter is less than 3
+            Log error ERR-004
+            Display "Payment declined. Please try a different card."
+            Go back to start of PAYMENT FLOW
+
+        IF retry counter equals 3
+            Log error ERR-004
+            Display "Payment declined. Please proceed inside to pay at the booth."
+            Raise the gate bar
+            Alert staff
+            END this flow
+
+
+----------------------------------------------------------------
+SECTION 5 - ERROR FALLBACK FLOW
+----------------------------------------------------------------
+
+WHEN any critical fault is detected
+
+    Log the error with error code, timestamp, kiosk ID, and fault description
+
+    Display a plain-language message to the patron
+        Message must include what happened
+        Message must include what the patron should do next
+
+    IF the fault prevents the gate from operating normally
+        Raise the gate bar as fail-safe
+        Do NOT lower the gate until staff manually resets it
+
+    Send an alert to the admin dashboard
+        Include error code
+        Include kiosk ID
+        Include timestamp
+        Include fault description
+
+    IF the fault is a critical system failure
+        Disable the kiosk
+        Display "Kiosk is out of service. Please pay inside."
+        Keep the gate bar raised until staff arrives
+
+
+----------------------------------------------------------------
+SECTION 6 - ADMIN FUNCTIONS
+----------------------------------------------------------------
+
+WHEN admin logs into the dashboard
+
+    Authenticate admin using username and password
+    IF credentials are invalid
+        Display "Invalid credentials."
+        Log failed login attempt
+        END this flow
+
+    Issue a JWT token to the admin session
+    Display admin dashboard
+
+    ADMIN CAN DO THE FOLLOWING
+
+    View all active tickets
+
+    View transaction history
+        Filter by date range
+        Filter by status (Paid, Declined, Pending, Voided)
+
+    Update rate schedule
+        Set free period duration in minutes
+        Set rate for each tier
+        Set tax rate as a percentage
+        Save changes to database
+
+    View system health status
+        Printer paper levels
+        Payment gateway status
+        Gate status (open or closed)
+        Network connectivity
+        Last error log entries
+
+    Manually override a gate
+        Select entry gate or exit gate
+        Choose raise or lower
+        Confirm the action
+        Log the override with admin ID and timestamp
+
+    View error logs
+        Filter by error code
+        Filter by date range
+        Export to CSV
+
+
+----------------------------------------------------------------
+SECTION 7 - DATA RULES
+----------------------------------------------------------------
+
+TICKET
+    Each ticket has a unique UUID
+    Entry timestamp is stored in UTC
+    Status is one of: ACTIVE, PAID, VOID
+    A ticket cannot be used more than once at the exit
+
+TRANSACTION
+    Each payment attempt creates a transaction record
+    Status is one of: PAID, DECLINED, PENDING, VOIDED
+    Card data is never stored, only the gateway token reference
+
+RATE SCHEDULE
+    Only one active rate schedule exists at a time
+    Changes to rates take effect immediately on save
+    Historical transactions keep the rate that was applied at the time of payment
+
+GATE
+    Default state is CLOSED
+    Gate only opens when triggered by the system or an admin override
+    Every gate state change is logged with a reason and timestamp
+
+ERROR LOGS
+    Every error is logged regardless of severity
+    Log entries cannot be deleted, only reviewed
+
+
+----------------------------------------------------------------
+SECTION 8 - SYSTEM HEALTH CHECK
+----------------------------------------------------------------
+
+EVERY 60 seconds the system runs automatically
+
+    Ping the database
+    IF no response
+        Log ERR-008
+        Alert staff
+
+    Ping the payment gateway
+    IF no response
+        Log ERR-005
+        Flag payment as offline
+        Alert staff
+
+    Check printer paper sensor
+    IF paper is low
+        Alert staff with warning
+    IF paper is empty
+        Log ERR-001
+        Flag printer as unavailable
+        Alert staff
+
+    Check receipt paper sensor
+    IF receipt paper is empty
+        Log ERR-006
+        Flag receipt printer as unavailable
+        Alert staff
+
+    Report health status to admin dashboard
+
+
+================================================================
+END OF PSEUDOCODE
+================================================================
