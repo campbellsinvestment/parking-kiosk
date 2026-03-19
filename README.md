@@ -144,17 +144,15 @@ parking-kiosk-system/
 |
 |-- docs/
 |   |-- PKS-BRD-001.docx             Business Requirements Document
-|   |-- pseudocode.md                Plain-language logic before code
+|   |-- pseudocode.txt               Plain-language logic before code
+|   |-- class_diagram.svg            UML class diagram
+|   |-- erd_database_schema.html     Entity relationship diagram
+|   |-- sequence_entry.svg           Sequence diagram for entry flow
+|   |-- sequence_exit_payment.svg    Sequence diagram for exit/payment flow
 |   |-- diagrams/
 |       |-- flowchart-entry.drawio
 |       |-- flowchart-exit.drawio
 |       |-- flowchart-error.drawio
-|       |-- uml/
-|           |-- use-case.vpp
-|           |-- sequence-entry.vpp
-|           |-- sequence-exit.vpp
-|           |-- class-diagram.vpp
-|           |-- erd.vpp
 |
 |-- src/
 |   |-- backend/
