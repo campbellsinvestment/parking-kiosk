@@ -28,26 +28,119 @@ body {
   cursor: grabbing;
 }
 
-.hint {
+/* CRT / TV pop-out (same aspect as kiosk texture) */
+.kiosk-popout {
   position: fixed;
-  left: 50%;
-  bottom: max(12px, env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  margin: 0;
-  padding: 6px 12px;
-  font: 12px/1.35 system-ui, sans-serif;
-  color: rgba(220, 232, 248, 0.92);
-  background: rgba(12, 18, 28, 0.55);
-  border-radius: 999px;
-  border: 1px solid rgba(120, 160, 210, 0.28);
-  pointer-events: none;
-  user-select: none;
-  max-width: min(92vw, 440px);
-  text-align: center;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 50;
+  pointer-events: auto;
+  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.45));
 }
 
-@media (max-height: 480px) {
-  .hint {
-    display: none;
+.kiosk-popout--hidden {
+  display: none;
+}
+
+.kiosk-popout__frame {
+  position: relative;
+  width: min(44vw, 520px);
+}
+
+.kiosk-popout__screen {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(70vh, 540px);
+  border-radius: 4px;
+  border: 4px solid #2d6a4f;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  cursor: default;
+  touch-action: manipulation;
+}
+
+/* One-time “parked” celebration */
+.park-celebration {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 14, 22, 0.45);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+.park-celebration--hidden {
+  display: none;
+}
+
+.park-celebration__panel {
+  max-width: 420px;
+  padding: 28px 26px 22px;
+  text-align: center;
+  background: linear-gradient(165deg, #f8fafc 0%, #e2e8f0 100%);
+  border-radius: 14px;
+  border: 3px solid #2d6a4f;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  animation: park-celebration-pop 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes park-celebration-pop {
+  from {
+    transform: scale(0.88);
+    opacity: 0;
   }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.park-celebration__check {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  line-height: 56px;
+  font-size: 32px;
+  font-weight: 800;
+  color: #fff;
+  background: #2d6a4f;
+  border-radius: 50%;
+}
+
+.park-celebration__title {
+  margin: 0 0 10px;
+  font: 700 17px/1.25 Tahoma, "MS Sans Serif", system-ui, sans-serif;
+  color: #0f172a;
+}
+
+.park-celebration__lead {
+  margin: 0 0 12px;
+  font: 15px/1.4 Tahoma, "MS Sans Serif", system-ui, sans-serif;
+  color: #1e293b;
+}
+
+.park-celebration__hint {
+  margin: 0 0 20px;
+  font: 15px/1.45 Tahoma, "MS Sans Serif", system-ui, sans-serif;
+  color: #334155;
+}
+
+.park-celebration__ok {
+  padding: 10px 28px;
+  font: 700 15px Tahoma, "MS Sans Serif", system-ui, sans-serif;
+  color: #fff;
+  background: #2d6a4f;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.park-celebration__ok:hover {
+  filter: brightness(1.08);
 }

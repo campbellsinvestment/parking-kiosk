@@ -15,8 +15,33 @@
     </script>
   </head>
   <body>
-    <canvas id="c" tabindex="0" aria-label="Parking kiosk — drag to orbit, short tap a kiosk display to use it"></canvas>
-    <p class="hint" aria-hidden="true">Drag to orbit · Scroll to zoom · Short tap entrance or exit display</p>
-    <script type="module" src="./main.js?v=kiosk-exit-inside-2026-05"></script>
+    <canvas
+      id="c"
+      tabindex="0"
+      aria-label="Parking kiosk. Camera follows the selected car. Click a car to select. Arrows drive. Escape closes the pop-out."
+    ></canvas>
+    <div
+      id="park-celebration"
+      class="park-celebration park-celebration--hidden"
+      aria-hidden="true"
+      role="dialog"
+      aria-labelledby="park-celebration-title"
+    >
+      <div class="park-celebration__panel">
+        <div class="park-celebration__check" aria-hidden="true">✓</div>
+        <h2 id="park-celebration-title" class="park-celebration__title">Parked</h2>
+        <p class="park-celebration__lead">You are in your space. Entry gate is down.</p>
+        <p class="park-celebration__hint">
+          Click a car to select it, then arrow keys to drive. To leave, use an exit kiosk screen.
+        </p>
+        <button type="button" id="park-celebration-ok" class="park-celebration__ok">Got it</button>
+      </div>
+    </div>
+    <div id="kiosk-popout" class="kiosk-popout kiosk-popout--hidden" aria-hidden="true">
+      <div class="kiosk-popout__frame">
+        <canvas id="kiosk-popout-canvas" width="960" height="540" class="kiosk-popout__screen"></canvas>
+      </div>
+    </div>
+    <script type="module" src="./main.js?v=kiosk-fonts-2026-05"></script>
   </body>
 </html>

@@ -53,6 +53,9 @@ const FLOW = {
   EXIT_DONE: "EXIT_DONE",
 };
 
+/** Physical stalls in the 3D lot (two rows × stallCount); matches main.js layout. */
+export const LOT_CAPACITY = 10;
+
 export class KioskEngine {
   constructor(onChange) {
     this._notify = typeof onChange === "function" ? onChange : () => {};
@@ -75,6 +78,14 @@ export class KioskEngine {
     this.gateMode = "closed"; // 'closed' | 'entry' | 'exit'
     /** Last successfully issued ticket QR JSON (for on-kiosk “scanner” demo). */
     this.lastIssuedQr = null;
+    /** Parked vehicles in the fenced lot (NPC stalls + patron when parked). */
+    this.occupiedSpaces = 9;
+    /** Patron vehicle is parked and counts toward capacity. */
+    this.playerParkedInLot = false;
+    /** Last completed payment method for UI / 3D props ('card' | 'cash'). */
+    this.lastPaymentMethod = null;
+    /** When true, ticket print and card gateway may randomly fail (for QA). Off by default; use Service, Random faults. */
+    this.simulateRandomFaults = false;
   }
 
   get snapshot() {
@@ -94,6 +105,11 @@ export class KioskEngine {
       exitBreakdown: this.exitBreakdown,
       paymentRetries: this.paymentRetries,
       log: [...this.log],
+      occupiedSpaces: this.occupiedSpaces,
+      lotCapacity: LOT_CAPACITY,
+      playerParkedInLot: this.playerParkedInLot,
+      lastPaymentMethod: this.lastPaymentMethod,
+      simulateRandomFaults: this.simulateRandomFaults,
     };
   }
 
@@ -114,8 +130,8 @@ export class KioskEngine {
     if (!this.dbOnline) {
       this._err("ERR-008", "Database unreachable");
       this.kioskStatus = KIOSK_STATUS.OUT_OF_SERVICE;
-      this.message = "Kiosk is out of service. Please pay inside.";
-      this.detail = "Fail-safe: gate would raise on real hardware.";
+      this.message = "Out of service. Pay inside.";
+      this.detail = "Fail-safe: exit gate would open.";
       this.gateOpen = true;
       this.gateMode = "exit";
       this._emit();
@@ -136,37 +152,65 @@ export class KioskEngine {
     this.gateOpen = false;
     this.gateMode = "closed";
     this.flow = FLOW.IDLE;
-    this.message = "Welcome. Touch a button on this display.";
+    this.message = "Welcome. Touch a button.";
     this.detail =
       this.kioskStatus === KIOSK_STATUS.LIMITED
-        ? "Limited mode: payments may route inside if the gateway stays offline."
+        ? "Limited mode: pay inside if the gateway is offline."
         : "";
+    this.occupiedSpaces = 9;
+    this.playerParkedInLot = false;
+    this.lastPaymentMethod = null;
     this._emit();
   }
 
   /** After free exit / offline payment / decline limit — patron taps Done on display. */
   acknowledgeExit() {
     if (this.flow !== FLOW.EXIT_DONE) return;
+    this.gateOpen = false;
+    this.gateMode = "closed";
     this.flow = FLOW.IDLE;
-    this.message = "Welcome. Touch a button on this display.";
+    this.message = "Welcome. Touch a button.";
     this.detail =
       this.kioskStatus === KIOSK_STATUS.LIMITED
-        ? "Limited mode: payments may route inside if the gateway stays offline."
+        ? "Limited mode: pay inside if the gateway is offline."
         : "";
+    if (this.playerParkedInLot) {
+      this.playerParkedInLot = false;
+      this.occupiedSpaces = Math.max(0, this.occupiedSpaces - 1);
+    }
+    this.lastPaymentMethod = null;
+    this.lastIssuedQr = null;
+    this.currentTicketId = null;
+    this.exitBreakdown = null;
+    this.paymentRetries = 0;
+    this._emit();
+  }
+
+  /** Called from the 3D demo when the patron car finishes parking in the last free stall. */
+  markPlayerParkedInLot() {
+    if (this.playerParkedInLot) return;
+    this.playerParkedInLot = true;
+    if (this.occupiedSpaces < LOT_CAPACITY) this.occupiedSpaces += 1;
     this._emit();
   }
 
   /** Section 2 — entry button. */
   async pressEntryButton() {
     if (this.kioskStatus === KIOSK_STATUS.OUT_OF_SERVICE) {
-      this.message = "Kiosk is out of service.";
+      this.message = "Out of service. Pay inside.";
+      this._emit();
+      return null;
+    }
+    if (this.occupiedSpaces >= LOT_CAPACITY) {
+      this.message = "Lot is full.";
+      this.detail = "No spaces. Try again later.";
       this._emit();
       return null;
     }
     if (!this.ticketPaperOk) {
       this._err("ERR-001", "Printer unavailable");
-      this.message = "Paper unavailable. Please proceed inside to pay.";
-      this.detail = "Gate raised (simulated).";
+      this.message = "Paper out. Pay inside.";
+      this.detail = "Gate raised (sim).";
       this.gateOpen = true;
       this.gateMode = "entry";
       this._emit();
@@ -174,7 +218,7 @@ export class KioskEngine {
     }
 
     this.flow = FLOW.ENTRY_PRINTING;
-    this.message = "Printing your ticket…";
+    this.message = "Printing ticket...";
     this.detail = "";
     this._emit();
     await delay(900);
@@ -184,11 +228,11 @@ export class KioskEngine {
     this.tickets.set(id, { id, entryMs, status: "ACTIVE" });
     const qr = encodeQrPayload(id, entryMs);
 
-    const printFails = Math.random() < 0.008; // rare demo fault
+    const printFails = this.simulateRandomFaults && Math.random() < 0.22;
     if (printFails) {
       this._err("ERR-001", "Print failed");
       this.tickets.get(id).status = "VOID";
-      this.message = "Paper unavailable. Please proceed inside to pay.";
+      this.message = "Paper out. Pay inside.";
       this.gateOpen = true;
       this.gateMode = "entry";
       this.flow = FLOW.IDLE;
@@ -198,26 +242,41 @@ export class KioskEngine {
 
     this.lastIssuedQr = qr;
     this.flow = FLOW.ENTRY_GATE_OPEN;
-    this.message = "Welcome. Please take your ticket.";
-    this.detail = "Gate opening. Remove ticket from slot.";
+    this.message = "Take your ticket.";
+    this.detail = "Gate opening. Pull ticket from slot.";
     this.gateOpen = true;
     this.gateMode = "entry";
     this._emit();
+    return { ticketId: id, qr };
+  }
 
-    await delay(2200);
+  /**
+   * Patron confirms they took the slip (or acknowledges the issued ticket).
+   * Gate stays open until the car reaches a stall; exit scan still uses `lastIssuedQr`.
+   */
+  patronTakeTicketFromSlot() {
+    if (this.flow !== FLOW.ENTRY_GATE_OPEN) return false;
+    this.message = "Ticket taken. Drive in when ready.";
+    this.detail = "Saved for exit scan. Gate stays open.";
+    this._emit();
+    return true;
+  }
+
+  /** After ticket pickup: gate stays open until the patron car reaches the stall (3D demo calls this). */
+  patronFinishedEntryDrive() {
+    if (this.flow !== FLOW.ENTRY_GATE_OPEN) return;
     this.gateOpen = false;
     this.gateMode = "closed";
     this.flow = FLOW.IDLE;
-    this.message = "Entry complete. Have a good visit.";
+    this.message = "Entry complete. Enjoy your visit.";
     this.detail = "";
     this._emit();
-    return { ticketId: id, qr };
   }
 
   /** Begin exit: prompt for scan (Section 3). */
   beginExit() {
     if (this.kioskStatus === KIOSK_STATUS.OUT_OF_SERVICE) {
-      this.message = "Kiosk is out of service.";
+      this.message = "Out of service. Pay inside.";
       this._emit();
       return;
     }
@@ -225,21 +284,21 @@ export class KioskEngine {
     this.currentTicketId = null;
     this.exitBreakdown = null;
     this.paymentRetries = 0;
-    this.message = "Please scan your ticket.";
-    this.detail = "Hold ticket to the reader, then touch SCAN on this display.";
+    this.message = "Scan your ticket.";
+    this.detail = "Hold ticket to reader, then tap Scan.";
     this._emit();
   }
 
   /** Simulated QR reader: uses last issued ticket, else newest active ticket. */
   scanFromReader() {
     if (this.flow !== FLOW.EXIT_SCAN) {
-      this.message = "Touch EXIT on the home screen first.";
+      this.message = "Tap Exit / pay on the home screen first.";
       this._emit();
       return false;
     }
     const raw = this.lastIssuedQr || this._latestActiveQrPayload();
     if (!raw) {
-      this.message = "No ticket found. Take a ticket at entry first.";
+      this.message = "No ticket. Get one at entry first.";
       this._emit();
       return false;
     }
@@ -250,10 +309,10 @@ export class KioskEngine {
   cancelExitFlow() {
     if (this.flow !== FLOW.EXIT_SCAN) return;
     this.flow = FLOW.IDLE;
-    this.message = "Welcome. Touch a button on this display.";
+    this.message = "Welcome. Touch a button.";
     this.detail =
       this.kioskStatus === KIOSK_STATUS.LIMITED
-        ? "Limited mode: payments may route inside if the gateway stays offline."
+        ? "Limited mode: pay inside if the gateway is offline."
         : "";
     this._emit();
   }
@@ -280,7 +339,7 @@ export class KioskEngine {
       ({ ticketId, entryMs } = decodeQrPayload(qrRaw.trim()));
     } catch {
       this._err("ERR-003", "Invalid QR");
-      this.message = "Invalid ticket. Please see staff at the booth.";
+      this.message = "Invalid ticket. See booth staff.";
       this.detail = "";
       this.gateOpen = false;
       this._emit();
@@ -290,19 +349,19 @@ export class KioskEngine {
     const ticket = this.tickets.get(ticketId);
     if (!ticket) {
       this._err("ERR-003", "Ticket not in database");
-      this.message = "Invalid ticket. Please see staff at the booth.";
+      this.message = "Invalid ticket. See booth staff.";
       this._emit();
       return false;
     }
     if (ticket.status === "PAID") {
-      this.message = "This ticket has already been paid.";
+      this.message = "Already paid.";
       this.detail = "";
       this._emit();
       return false;
     }
     if (ticket.status === "VOID") {
       this._err("ERR-003", "Void ticket");
-      this.message = "Invalid ticket. Please see staff at the booth.";
+      this.message = "Invalid ticket. See booth staff.";
       this._emit();
       return false;
     }
@@ -318,9 +377,10 @@ export class KioskEngine {
     this.flow = FLOW.EXIT_SUMMARY;
 
     if (total <= 0) {
-      this.message = "No charge. Have a good day.";
-      this.detail = `Parked ${minutes} min (free period).`;
+      this.message = "No charge. Good day.";
+      this.detail = `${minutes} min, free period.`;
       ticket.status = "PAID";
+      this.lastPaymentMethod = "cash";
       this.gateOpen = true;
       this.gateMode = "exit";
       this.flow = FLOW.EXIT_DONE;
@@ -330,9 +390,10 @@ export class KioskEngine {
 
     if (!this.paymentGatewayOnline) {
       this._err("ERR-005", "Payment gateway offline");
-      this.message = "Payment system offline. Gate is open. Please pay inside.";
+      this.message = "Payment offline. Gate open. Pay inside.";
       this.detail = "";
       ticket.status = "PAID";
+      this.lastPaymentMethod = "cash";
       this.gateOpen = true;
       this.gateMode = "exit";
       this.flow = FLOW.EXIT_DONE;
@@ -348,8 +409,8 @@ export class KioskEngine {
   }
 
   /**
-   * Section 4 — pay with card (simulated gateway).
-   * @param {{ approve?: boolean }} opts approve false simulates decline
+   * Section 4 — pay with card (simulated gateway) or cash.
+   * @param {{ approve?: boolean, method?: 'card' | 'cash' }} opts
    */
   async pay(opts = {}) {
     if (this.flow !== FLOW.EXIT_PAYMENT || !this.currentTicketId || !this.exitBreakdown) {
@@ -358,11 +419,38 @@ export class KioskEngine {
       return;
     }
     const ticket = this.tickets.get(this.currentTicketId);
+    const method = opts.method === "cash" ? "cash" : "card";
     const approve = opts.approve !== false;
+
+    const finishPaid = () => {
+      ticket.status = "PAID";
+      this.lastPaymentMethod = method;
+      if (method === "cash") {
+        this.message = "Cash accepted. Thank you.";
+      } else {
+        this.message = "Payment approved. Thank you.";
+      }
+      if (!this.receiptPaperOk) {
+        if (this.simulateRandomFaults) this._err("ERR-006", "Receipt printer unavailable");
+        this.detail = "Paid. No receipt slip (printer off).";
+      } else {
+        this.detail = "Paid. Take receipt from slot below.";
+      }
+      this.gateOpen = true;
+      this.gateMode = "exit";
+      this.flow = FLOW.EXIT_DONE;
+      this._emit();
+    };
+
+    if (method === "cash") {
+      await delay(500);
+      finishPaid();
+      return;
+    }
 
     if (!this.paymentGatewayOnline) {
       this._err("ERR-005", "Gateway offline during payment");
-      this.message = "Connection issue. Please try again or proceed inside.";
+      this.message = "Connection issue. Retry or pay inside.";
       this.gateOpen = true;
       this.gateMode = "exit";
       this._emit();
@@ -370,10 +458,10 @@ export class KioskEngine {
     }
 
     await delay(600);
-    const timeout = Math.random() < 0.05;
+    const timeout = this.simulateRandomFaults && Math.random() < 0.12;
     if (timeout) {
       this._err("ERR-005", "No response within timeout");
-      this.message = "Connection issue. Please try again or proceed inside.";
+      this.message = "Connection issue. Retry or pay inside.";
       this.gateOpen = true;
       this.gateMode = "exit";
       this._emit();
@@ -384,11 +472,11 @@ export class KioskEngine {
       this.paymentRetries += 1;
       this._err("ERR-004", "Card declined");
       if (this.paymentRetries < 3) {
-        this.message = "Payment declined. Please try a different card.";
+        this.message = "Declined. Try another card.";
         this._emit();
         return;
       }
-      this.message = "Payment declined. Please proceed inside to pay at the booth.";
+      this.message = "Declined. Pay inside at booth.";
       this.detail = "";
       this.gateOpen = true;
       this.gateMode = "exit";
@@ -397,33 +485,15 @@ export class KioskEngine {
       return;
     }
 
-    ticket.status = "PAID";
-    this.message = "Payment approved. Thank you.";
-    if (!this.receiptPaperOk) {
-      this._err("ERR-006", "Receipt printer unavailable");
-      this.detail = "Payment accepted. Receipt unavailable. Thank you.";
-    } else {
-      this.detail = "Receipt printed (simulated).";
-    }
-    this.gateOpen = true;
-    this.gateMode = "exit";
-    this.flow = FLOW.EXIT_DONE;
-    this._emit();
-    await delay(2000);
-    this.gateOpen = false;
-    this.gateMode = "closed";
-    this.flow = FLOW.IDLE;
-    this.message = "Thank you. Drive safely.";
-    this.detail = "";
-    this._emit();
+    finishPaid();
   }
 
   /** Section 5 — critical fault demo. */
   triggerCriticalFault() {
     this._err("ERR-007", "Critical hardware fault (simulated)");
     this.kioskStatus = KIOSK_STATUS.OUT_OF_SERVICE;
-    this.message = "Kiosk is out of service. Please pay inside.";
-    this.detail = "Gate held open until staff reset.";
+    this.message = "Out of service. Pay inside.";
+    this.detail = "Gate open until staff reset.";
     this.gateOpen = true;
     this.gateMode = "exit";
     this._emit();
@@ -435,10 +505,16 @@ export class KioskEngine {
     this.dbOnline = true;
     this.ticketPaperOk = true;
     this.receiptPaperOk = true;
+    this.simulateRandomFaults = false;
     this.startup();
   }
 
   /** Demo toggles */
+  setSimulateRandomFaults(v) {
+    this.simulateRandomFaults = !!v;
+    this._emit();
+  }
+
   setDbOnline(v) {
     this.dbOnline = v;
     this._emit();

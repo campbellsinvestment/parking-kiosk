@@ -1,13 +1,53 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { KioskEngine } from "./kioskEngine.js";
+import { KioskEngine, LOT_CAPACITY } from "./kioskEngine.js";
 
 const SCREEN_W = 960;
 const SCREEN_H = 540;
 
+/** Kiosk canvas typography (Win9x-style): one family, fixed sizes */
+const KFONT = 'Tahoma, "MS Sans Serif", sans-serif';
+const KFONT_TITLE = `bold 17px ${KFONT}`;
+const KFONT_BTN = `bold 17px ${KFONT}`;
+const KFONT_MSG = `17px ${KFONT}`;
+const KFONT_DTL = `15px ${KFONT}`;
+const KFONT_META = `14px ${KFONT}`;
+const KFONT_ACCENT = `bold 15px ${KFONT}`;
+const K_LH_MSG = 22;
+const K_LH_DTL = 19;
+const K_LH_META = 18;
+
 const canvas = document.getElementById("c");
+const popoutEl = document.getElementById("kiosk-popout");
+const popoutCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById("kiosk-popout-canvas"));
+/** @type {CanvasRenderingContext2D | null} */
+const popoutCtx = popoutCanvasEl ? popoutCanvasEl.getContext("2d") : null;
+const popoutHits = [];
+/** @type {null | "entry" | "exit"} */
+let popoutSource = null;
 /** @type {'patron' | 'service'} */
 let uiPage = "patron";
+
+const parkCelebrationEl = document.getElementById("park-celebration");
+const parkCelebrationOkEl = document.getElementById("park-celebration-ok");
+/** One celebration per visit after first successful stall park (reset on exit / fault reset). */
+let parkCelebrationShown = false;
+/** After ENTRY_GATE_OPEN, slip hidden until next print cycle (3D + UI). */
+let entryTicketPulled = false;
+
+function hideParkCelebration() {
+  if (!parkCelebrationEl) return;
+  parkCelebrationEl.classList.add("park-celebration--hidden");
+  parkCelebrationEl.setAttribute("aria-hidden", "true");
+}
+
+function showParkCelebration() {
+  if (!parkCelebrationEl) return;
+  parkCelebrationEl.classList.remove("park-celebration--hidden");
+  parkCelebrationEl.setAttribute("aria-hidden", "false");
+}
+
+parkCelebrationOkEl?.addEventListener("click", () => hideParkCelebration());
 
 const screenHitsEntry = [];
 const screenHitsExit = [];
@@ -24,6 +64,13 @@ screenTexEntry.colorSpace = THREE.SRGBColorSpace;
 screenTexExit.colorSpace = THREE.SRGBColorSpace;
 screenTexEntry.minFilter = screenTexExit.minFilter = THREE.LinearFilter;
 screenTexEntry.magFilter = screenTexExit.magFilter = THREE.LinearFilter;
+
+/** Patron drive sim (must exist before KioskEngine — startup calls renderDisplay). */
+/** Patron at entry kiosk zone (patron car only). */
+let playerAtEntryBooth = false;
+/** Currently selected vehicle for arrow-key driving. */
+let selectedDriveGroup = /** @type {THREE.Group | null} */ (null);
+const keyDrive = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
 
 const engine = new KioskEngine(() => renderDisplay());
 engine.startup();
@@ -66,6 +113,8 @@ const aisleCenterX = -6.15;
 const aisleHalfW = 2.35;
 const aisleX0 = aisleCenterX - aisleHalfW;
 const aisleX1 = aisleCenterX + aisleHalfW;
+/** Center lot drive width (∥ Z) — perimeter circulation inside the fence matches this */
+const LOT_CENTER_DRIVE_W = aisleX1 - aisleX0;
 const rowAX = aisleCenterX - aisleHalfW - stallDepth * 0.5;
 const rowBX = aisleCenterX + aisleHalfW + stallDepth * 0.5;
 const z0 = -5.55;
@@ -79,8 +128,12 @@ const zMid = (z0 + z0 + (stallCount - 1) * stallPitch) * 0.5;
 /** Lot slab AABB (+X / +Z edges) — road + booth sit outside this footprint */
 const lotCenterX = -5.85;
 const lotCenterZ = 0.25;
-const lotPlaneW = 18;
-const lotPlaneD = 19;
+const lotSlabBaseW = 18;
+const lotSlabBaseD = 19;
+/** Inner margin on each side inside fence = same width as center aisle (room to manoeuvre) */
+const lotPerimeterBand = LOT_CENTER_DRIVE_W;
+const lotPlaneW = lotSlabBaseW + 2 * lotPerimeterBand;
+const lotPlaneD = lotSlabBaseD + 2 * lotPerimeterBand;
 const xLotSlabRight = lotCenterX + lotPlaneW * 0.5;
 
 /** Perimeter fence bounds (east X = lot edge + inset; used for gate posts on same vertical line) */
@@ -149,19 +202,52 @@ const EXIT_YAW = Math.PI;
 const CAM_TARGET_X = connXC;
 const CAM_TARGET_Z = GATE_Z;
 
-const camera = new THREE.PerspectiveCamera(48, 1, 0.08, 200);
-camera.position.set(connXC + 5.8, 2.35, GATE_Z + 4.1);
+const camera = new THREE.PerspectiveCamera(48, 1, 0.04, 220);
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.set(CAM_TARGET_X, 1.32, CAM_TARGET_Z);
-controls.enableDamping = true;
-controls.dampingFactor = 0.06;
-controls.minDistance = 2.2;
-controls.maxDistance = 11;
-controls.minPolarAngle = Math.PI * 0.22;
-controls.maxPolarAngle = Math.PI * 0.5;
+controls.enableDamping = false;
+controls.enableRotate = false;
 controls.enablePan = false;
+controls.enableZoom = false;
+controls.enabled = false;
+controls.minDistance = 0.09;
+controls.maxDistance = 95;
+controls.minPolarAngle = Math.PI * 0.08;
+controls.maxPolarAngle = Math.PI * 0.55;
+controls.screenSpacePanning = true;
+controls.panSpeed = 0.65;
 controls.rotateSpeed = 0.62;
+
+function closeKioskPopout() {
+  popoutSource = null;
+  if (popoutEl) {
+    popoutEl.classList.add("kiosk-popout--hidden");
+    popoutEl.setAttribute("aria-hidden", "true");
+  }
+}
+
+function openKioskPopout(which) {
+  if (!popoutEl || !popoutCtx || uiPage !== "patron") return;
+  popoutSource = which;
+  popoutEl.classList.remove("kiosk-popout--hidden");
+  popoutEl.setAttribute("aria-hidden", "false");
+  renderDisplay();
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = /** @type {HTMLElement | null} */ (e.target);
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if (parkCelebrationEl && !parkCelebrationEl.classList.contains("park-celebration--hidden")) {
+      hideParkCelebration();
+      return;
+    }
+    if (popoutSource) closeKioskPopout();
+  }
+});
 
 /** East fence gap in Z for connector (west fence continuous) */
 const entryGapZ0 = GATE_Z - connPavementZHalf - 0.14;
@@ -358,6 +444,22 @@ driveCenterLine.rotation.x = -Math.PI / 2;
 driveCenterLine.position.set(aisleCenterX, 0.0145, zMid);
 scene.add(driveCenterLine);
 
+/** Perimeter circulation (∥ fence), same width as center drive — darker asphalt ring */
+const innerSpanX = lotPlaneW - 2 * lotPerimeterBand;
+const innerSpanZ = lotPlaneD - 2 * lotPerimeterBand;
+const periY = 0.0122;
+const addPeriStrip = (w, d, cx, cz) => {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), driveLaneMat);
+  m.rotation.x = -Math.PI / 2;
+  m.position.set(cx, periY, cz);
+  m.receiveShadow = true;
+  scene.add(m);
+};
+addPeriStrip(lotPerimeterBand, innerSpanZ, lotCenterX - lotPlaneW * 0.5 + lotPerimeterBand * 0.5, lotCenterZ);
+addPeriStrip(lotPerimeterBand, innerSpanZ, lotCenterX + lotPlaneW * 0.5 - lotPerimeterBand * 0.5, lotCenterZ);
+addPeriStrip(innerSpanX, lotPerimeterBand, lotCenterX, lotCenterZ - lotPlaneD * 0.5 + lotPerimeterBand * 0.5);
+addPeriStrip(innerSpanX, lotPerimeterBand, lotCenterX, lotCenterZ + lotPlaneD * 0.5 - lotPerimeterBand * 0.5);
+
 for (let k = 0; k <= stallCount; k++) {
   const z = zBack + k * stallPitch;
   const westW = aisleX0 - xLotLeft;
@@ -422,17 +524,55 @@ function makeCar(bodyColor) {
   return g;
 }
 
+/** Patron car with side windows that can roll down (meshes move in cabin local −Y). */
+function makePlayerCar() {
+  const g = makeCar(0x2a5588);
+  const cabin = /** @type {THREE.Mesh} */ (g.children[1]);
+  const winMat = new THREE.MeshStandardMaterial({
+    color: 0x6a9fd0,
+    metalness: 0.35,
+    roughness: 0.12,
+    transparent: true,
+    opacity: 0.42,
+  });
+  const winGeo = new THREE.PlaneGeometry(0.34, 0.2);
+  const wL = new THREE.Mesh(winGeo, winMat);
+  wL.position.set(0.445, 0.02, -0.08);
+  wL.rotation.y = Math.PI / 2;
+  const wR = new THREE.Mesh(winGeo, winMat.clone());
+  wR.position.set(-0.445, 0.02, -0.08);
+  wR.rotation.y = -Math.PI / 2;
+  cabin.add(wL);
+  cabin.add(wR);
+  return { group: g, winL: wL, winR: wR };
+}
+
+/** One east-side stall left empty for the patron demo */
+const FREE_STALL_INDEX = 2;
+
+/** Body mesh nose points opposite travel direction; +π aligns model with drive + chase camera. */
+const VEHICLE_MESH_YAW_OFFSET = Math.PI;
+
+/** All vehicles the user can select and drive with the keyboard (patron car added below). */
+const driveableCars = /** @type {THREE.Group[]} */ ([]);
+
 const carColors = [0x8b2e3c, 0x1a5680, 0xc46028, 0x2f6b45, 0x5a4578, 0x6d6a2e, 0x444444, 0x9a8b7a];
 for (let k = 0; k < stallCount; k++) {
   const z = z0 + k * stallPitch;
   const cA = makeCar(carColors[k % carColors.length]);
   cA.position.set(rowAX, 0, z);
-  cA.rotation.y = -Math.PI / 2;
+  cA.rotation.y = -Math.PI / 2 + VEHICLE_MESH_YAW_OFFSET;
+  cA.userData.driveable = true;
   scene.add(cA);
-  const cB = makeCar(carColors[(k + 3) % carColors.length]);
-  cB.position.set(rowBX, 0, z);
-  cB.rotation.y = Math.PI / 2;
-  scene.add(cB);
+  driveableCars.push(cA);
+  if (k !== FREE_STALL_INDEX) {
+    const cB = makeCar(carColors[(k + 3) % carColors.length]);
+    cB.position.set(rowBX, 0, z);
+    cB.rotation.y = Math.PI / 2 + VEHICLE_MESH_YAW_OFFSET;
+    cB.userData.driveable = true;
+    scene.add(cB);
+    driveableCars.push(cB);
+  }
 }
 
 /** Starfield — very subtle in daylight sky */
@@ -500,8 +640,156 @@ kioskExitGroup.position.set(EXIT_KIOSK_X, 0, EXIT_KIOSK_Z);
 kioskExitGroup.rotation.y = EXIT_YAW;
 scene.add(kioskExitGroup);
 
+/** Printed ticket + receipt slips (3D) */
+const slipMat = new THREE.MeshStandardMaterial({ color: 0xf5f2e8, metalness: 0.05, roughness: 0.85 });
+const entryTicketMesh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.018, 0.075), slipMat);
+entryTicketMesh.position.set(0, 0.62, 0.38);
+entryTicketMesh.rotation.x = 0.12;
+entryTicketMesh.visible = false;
+entryTicketMesh.castShadow = true;
+kioskEntryGroup.add(entryTicketMesh);
+
+const exitReceiptMesh = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.018, 0.08), slipMat);
+exitReceiptMesh.position.set(0, 0.62, -0.38);
+exitReceiptMesh.rotation.x = -0.14;
+exitReceiptMesh.visible = false;
+exitReceiptMesh.castShadow = true;
+kioskExitGroup.add(exitReceiptMesh);
+
 const screenEntry = kioskEntryGroup.getObjectByName("kioskDisplayEntry");
 const screenExit = kioskExitGroup.getObjectByName("kioskDisplayExit");
+
+/** Patron + entry / exit drive zones (connSouthZc / connNorthZc from connector layout) */
+const PATRON_ENTRY_Z = connSouthZc;
+const PATRON_EXIT_Z = connNorthZc;
+const ENTRY_ZONE = { x: GATE_POST_X + 2.35, z: PATRON_ENTRY_Z, rSq: 2.85 * 2.85 };
+const wpPatronStart = { x: GATE_POST_X + 5.25, z: PATRON_ENTRY_Z, ry: Math.PI * 0.5 + VEHICLE_MESH_YAW_OFFSET };
+/** Exit staging hubs — drive any car into one to open the exit kiosk pop-out */
+const EXIT_STAGING = [
+  { x: EXIT_KIOSK_X - 1.0, z: EXIT_KIOSK_Z - 0.55, rSq: 2.35 * 2.35 },
+  { x: GATE_POST_X - 1.1, z: PATRON_EXIT_Z + 0.4, rSq: 2.15 * 2.15 },
+  { x: rowBX - 0.9, z: EXIT_KIOSK_Z - 1.75, rSq: 2.35 * 2.35 },
+];
+const patronStallX = rowBX;
+const patronStallZ = z0 + FREE_STALL_INDEX * stallPitch;
+const patronStallHalfX = 2.45;
+const patronStallHalfZ = 2.35;
+
+const playerCar = makePlayerCar();
+const playerCarGroup = playerCar.group;
+playerCarGroup.userData.driveable = true;
+playerCarGroup.userData.isPatronCar = true;
+playerCarGroup.position.set(wpPatronStart.x, 0, wpPatronStart.z);
+playerCarGroup.rotation.y = wpPatronStart.ry;
+scene.add(playerCarGroup);
+driveableCars.push(playerCarGroup);
+selectedDriveGroup = playerCarGroup;
+
+function xzDistSq(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return dx * dx + dz * dz;
+}
+
+function patronInFreeStall() {
+  return (
+    Math.abs(playerCarGroup.position.x - patronStallX) < patronStallHalfX &&
+    Math.abs(playerCarGroup.position.z - patronStallZ) < patronStallHalfZ
+  );
+}
+
+function carInEntryZone(g) {
+  return g === playerCarGroup && xzDistSq(g.position.x, g.position.z, ENTRY_ZONE.x, ENTRY_ZONE.z) <= ENTRY_ZONE.rSq;
+}
+
+function carInAnyExitStaging(g) {
+  for (const z of EXIT_STAGING) {
+    if (xzDistSq(g.position.x, g.position.z, z.x, z.z) <= z.rSq) return true;
+  }
+  return false;
+}
+
+function pickDriveableCar(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = clientX - rect.left;
+  const cy = clientY - rect.top;
+  ndc.x = (cx / rect.width) * 2 - 1;
+  ndc.y = -(cy / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(driveableCars, true);
+  if (!hits.length) return null;
+  let o = hits[0].object;
+  while (o) {
+    if (o.userData?.driveable) return /** @type {THREE.Group} */ (o);
+    o = o.parent;
+  }
+  return null;
+}
+
+function clampCarToWorld(g) {
+  const margin = 1.2;
+  g.position.x = THREE.MathUtils.clamp(g.position.x, xFenceL - 8, roadCenterX + roadHalfW + 18);
+  g.position.z = THREE.MathUtils.clamp(g.position.z, zFenceS - margin, zFenceN + margin);
+}
+
+function updateKeyboardDrive(dt) {
+  const g = selectedDriveGroup;
+  if (!g) return;
+  const prevX = g.position.x;
+  const prevZ = g.position.z;
+  const move = 5.2 * dt;
+  const turn = 2.35 * dt;
+  const ry = g.rotation.y;
+  const fx = Math.sin(ry);
+  const fz = Math.cos(ry);
+  /** Up = forward, Down = reverse (after mesh yaw +π) */
+  if (keyDrive.ArrowUp) {
+    g.position.x += fx * move;
+    g.position.z += fz * move;
+  }
+  if (keyDrive.ArrowDown) {
+    g.position.x -= fx * move;
+    g.position.z -= fz * move;
+  }
+  /** Left / Right steer the nose (yaw); car stays forward-facing along its heading */
+  if (keyDrive.ArrowLeft) g.rotation.y += turn;
+  if (keyDrive.ArrowRight) g.rotation.y -= turn;
+  clampCarToWorld(g);
+  resolveCarBoomCollision(g, prevX, prevZ);
+}
+
+/** Third-person camera: slightly above and behind the selected car, follows every frame. */
+function applyChaseCamera() {
+  const car = selectedDriveGroup;
+  if (!car) return;
+  const ry = car.rotation.y;
+  const fx = Math.sin(ry);
+  const fz = Math.cos(ry);
+  const behind = 6.75;
+  const height = 2.65;
+  const lookY = car.position.y + 0.92;
+  const cx = car.position.x;
+  const cz = car.position.z;
+  camera.position.set(cx - fx * behind, car.position.y + height, cz - fz * behind);
+  camera.lookAt(cx, lookY, cz);
+}
+
+let prevAtEntryZone = false;
+let prevAtExitStaging = false;
+
+function syncPopoutsToDriveZones() {
+  if (uiPage !== "patron") return;
+  const atEntry = carInEntryZone(playerCarGroup);
+  playerAtEntryBooth = atEntry;
+  if (atEntry && popoutSource !== "entry") openKioskPopout("entry");
+  const exitPick = selectedDriveGroup && carInAnyExitStaging(selectedDriveGroup);
+  if (exitPick && popoutSource !== "exit") openKioskPopout("exit");
+  if (atEntry !== prevAtEntryZone || exitPick !== prevAtExitStaging) {
+    prevAtEntryZone = atEntry;
+    prevAtExitStaging = !!exitPick;
+    renderDisplay();
+  }
+}
 
 /**
  * Entry / exit booms: ribbon across the connector in Z (blocks along −X / +X), hinge at lane edge, lift on +X rotation.
@@ -569,6 +857,46 @@ const gateTargetAngleExit = () => {
   return s.gateOpen && s.gateMode === "exit" ? -Math.PI * 0.48 : 0;
 };
 
+/** Boom target angle (radians); collision disabled when current angle is at or past this fraction of “open”. */
+const GATE_OPEN_ANGLE = -Math.PI * 0.48;
+const GATE_BOOM_COLLISION_OFF = GATE_OPEN_ANGLE * 0.82;
+/** XZ footprint: car length ~2 m — circle vs boom AABB */
+const CAR_GATE_COLLISION_R = 1.05;
+const _gateBarBox = new THREE.Box3();
+
+function circleHitsAabbXZ(px, pz, r, minX, maxX, minZ, maxZ) {
+  const qx = THREE.MathUtils.clamp(px, minX, maxX);
+  const qz = THREE.MathUtils.clamp(pz, minZ, maxZ);
+  const dx = px - qx;
+  const dz = pz - qz;
+  return dx * dx + dz * dz <= r * r;
+}
+
+/** Revert XZ move if the car would intersect a closed or partly lowered entry/exit boom. */
+function resolveCarBoomCollision(g, prevX, prevZ) {
+  gateGroup.updateMatrixWorld(true);
+  exitGateGroup.updateMatrixWorld(true);
+  const px = g.position.x;
+  const pz = g.position.z;
+  const r = CAR_GATE_COLLISION_R;
+
+  if (gateAngleEntry > GATE_BOOM_COLLISION_OFF) {
+    _gateBarBox.setFromObject(bar);
+    if (circleHitsAabbXZ(px, pz, r, _gateBarBox.min.x, _gateBarBox.max.x, _gateBarBox.min.z, _gateBarBox.max.z)) {
+      g.position.x = prevX;
+      g.position.z = prevZ;
+      return;
+    }
+  }
+  if (gateAngleExit > GATE_BOOM_COLLISION_OFF) {
+    _gateBarBox.setFromObject(exitBar);
+    if (circleHitsAabbXZ(px, pz, r, _gateBarBox.min.x, _gateBarBox.max.x, _gateBarBox.min.z, _gateBarBox.max.z)) {
+      g.position.x = prevX;
+      g.position.z = prevZ;
+    }
+  }
+}
+
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 
@@ -583,15 +911,55 @@ function roundRectPath(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawButton(hits, ctx, x, y, w, h, label, primary, action) {
-  roundRectPath(ctx, x, y, w, h, 14);
-  ctx.fillStyle = primary ? "#2e7bd6" : "#e8eef5";
-  ctx.fill();
-  ctx.strokeStyle = primary ? "rgba(255,255,255,0.5)" : "rgba(60, 100, 150, 0.4)";
+/** Classic PC window on teal desktop (Win 9x look) */
+function drawRetroShell(ctx, titleBar) {
+  ctx.fillStyle = "#008080";
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+  const bx = 10;
+  const by = 10;
+  const bw = SCREEN_W - 20;
+  const bh = SCREEN_H - 20;
+  ctx.fillStyle = "#c0c0c0";
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.fillStyle = primary ? "#ffffff" : "#1a2a40";
-  ctx.font = '600 26px system-ui, "Segoe UI", sans-serif';
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.strokeStyle = "#404040";
+  ctx.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+  ctx.fillStyle = "#000080";
+  ctx.fillRect(bx + 4, by + 4, bw - 8, 26);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = KFONT_TITLE;
+  ctx.textBaseline = "middle";
+  ctx.fillText(titleBar, bx + 10, by + 17);
+  ctx.textBaseline = "alphabetic";
+  const innerLeft = bx + 12;
+  const innerTop = by + 38;
+  const innerW = bw - 24;
+  const innerH = bh - 50;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(innerLeft, innerTop, innerW, innerH);
+  ctx.strokeStyle = "#808080";
+  ctx.strokeRect(innerLeft, innerTop, innerW, innerH);
+  ctx.strokeStyle = "#000000";
+  ctx.strokeRect(innerLeft + 1, innerTop + 1, innerW - 2, innerH - 2);
+  const innerBottom = innerTop + innerH;
+  /** First body line baseline: below title bar + inner frame so glyphs do not clip the top border */
+  const bodyTop = innerTop + 22;
+  return { x: innerLeft + 8, y: bodyTop, w: innerW - 18, innerBottom };
+}
+
+function drawButton(hits, ctx, x, y, w, h, label, primary, action) {
+  ctx.fillStyle = primary ? "#c0c0c0" : "#d8d4c8";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, 2);
+  ctx.fillRect(x, y, 2, h);
+  ctx.fillStyle = primary ? "#808080" : "#909090";
+  ctx.fillRect(x, y + h - 2, w, 2);
+  ctx.fillRect(x + w - 2, y, 2, h);
+  ctx.fillStyle = "#000000";
+  ctx.font = KFONT_BTN;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, x + w / 2, y + h / 2);
@@ -601,13 +969,16 @@ function drawButton(hits, ctx, x, y, w, h, label, primary, action) {
 }
 
 function drawSmallChip(hits, ctx, x, y, w, h, label, action) {
-  roundRectPath(ctx, x, y, w, h, 10);
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.fill();
-  ctx.strokeStyle = "rgba(70, 120, 180, 0.35)";
-  ctx.stroke();
-  ctx.fillStyle = "#2a4a68";
-  ctx.font = '500 18px system-ui, "Segoe UI", sans-serif';
+  ctx.fillStyle = "#c0c0c0";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, 1);
+  ctx.fillRect(x, y, 1, h);
+  ctx.fillStyle = "#808080";
+  ctx.fillRect(x, y + h - 1, w, 1);
+  ctx.fillRect(x + w - 1, y, 1, h);
+  ctx.fillStyle = "#000000";
+  ctx.font = KFONT_DTL;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, x + w / 2, y + h / 2);
@@ -616,250 +987,259 @@ function drawSmallChip(hits, ctx, x, y, w, h, label, action) {
   hits.push({ x, y, w, h, action });
 }
 
-function drawPatronScreenEntry(s) {
-  const ctx = screenCanvasEntry.getContext("2d");
-  screenHitsEntry.length = 0;
+function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits = screenHitsEntry) {
+  hits.length = 0;
+  const box = drawRetroShell(ctx, "Entry - PARKING.EXE");
+  const x0 = box.x;
+  const maxW = box.w;
+  const rowY = SCREEN_H - 72;
+  const btnH = 44;
+  const fullW = SCREEN_W - 52;
+  const textMaxY = rowY - 52;
 
-  const g = ctx.createLinearGradient(0, 0, SCREEN_W, SCREEN_H);
-  g.addColorStop(0, "#eef4fb");
-  g.addColorStop(0.5, "#e2ecf6");
-  g.addColorStop(1, "#d6e4f2");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-  ctx.strokeStyle = "rgba(60, 110, 170, 0.3)";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(10, 10, SCREEN_W - 20, SCREEN_H - 20);
+  let cy = box.y;
+  ctx.fillStyle = "#000000";
+  ctx.font = KFONT_MSG;
+  cy = wrapTextBlock(ctx, s.message || "...", x0, cy, maxW, K_LH_MSG, textMaxY) + 6;
 
-  ctx.fillStyle = "#1a4a78";
-  ctx.font = '700 30px system-ui, "Segoe UI", sans-serif';
-  ctx.fillText("ENTRANCE", 36, 48);
-  ctx.fillStyle = "rgba(35, 75, 115, 0.78)";
-  ctx.font = '20px system-ui, "Segoe UI", sans-serif';
-  ctx.fillText("Facing the connector · take a ticket here", 36, 78);
-
-  ctx.fillStyle = "rgba(35, 75, 115, 0.78)";
-  ctx.font = '22px system-ui, "Segoe UI", sans-serif';
-  const sub =
-    s.kioskStatus === "OUT_OF_SERVICE"
-      ? "Out of service"
-      : s.kioskStatus === "LIMITED"
-        ? "Limited operation"
-        : "Self-service";
-  ctx.fillText(sub, 36, 108);
-
-  ctx.fillStyle = "#1e3a58";
-  ctx.font = '26px system-ui, "Segoe UI", sans-serif';
-  wrapText(ctx, s.message || "—", 36, 142, SCREEN_W - 72, 32);
-
-  ctx.fillStyle = "rgba(25, 65, 105, 0.88)";
-  ctx.font = '20px ui-monospace, SFMono-Regular, Menlo, monospace';
-  const lines = (s.detail || "").split("\n").slice(0, 6);
-  let ly = 214;
-  for (const ln of lines) {
-    ctx.fillText(ln.slice(0, 52), 36, ly);
-    ly += 26;
+  ctx.font = KFONT_DTL;
+  for (const para of (s.detail || "").split("\n")) {
+    const t = para.trim();
+    if (!t || cy >= textMaxY) continue;
+    cy = wrapTextBlock(ctx, t, x0, cy, maxW, K_LH_DTL, textMaxY) + 4;
   }
 
-  ctx.fillStyle = "#a65c10";
-  ctx.font = '18px system-ui, sans-serif';
-  const entryOpen = s.gateOpen && s.gateMode === "entry";
-  ctx.fillText(entryOpen ? "Entry gate OPEN" : "Entry gate closed", 36, SCREEN_H - 118);
-
-  const rowY = SCREEN_H - 82;
-  const btnH = 56;
-  const fullW = SCREEN_W - 72;
+  ctx.fillStyle = "#000080";
+  ctx.font = KFONT_META;
+  const gateY = Math.min(cy + 10, rowY - btnH - 28);
+  const gate = s.gateOpen && s.gateMode === "entry" ? "Entry gate: OPEN" : "Entry gate: closed";
+  ctx.fillText(gate, x0, gateY);
 
   if (s.kioskStatus === "OUT_OF_SERVICE") {
-    drawButton(screenHitsEntry, ctx, 36, rowY, fullW, btnH, "STAFF RESET", true, "reset");
+    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Reset", true, "reset");
     return;
   }
 
   if (s.flow === "EXIT_SCAN" || s.flow === "EXIT_PAYMENT" || s.flow === "EXIT_DONE") {
-    ctx.fillStyle = "rgba(30, 85, 135, 0.9)";
-    ctx.font = '22px system-ui, sans-serif';
-    wrapText(ctx, "Ticket time and payment are handled at the EXIT kiosk on the other side of this lane.", 36, rowY - 8, SCREEN_W - 72, 28);
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_DTL;
+    wrapTextBlock(ctx, "Use an exit kiosk in the lot to scan and pay.", x0, gateY + K_LH_META, maxW, K_LH_DTL, box.innerBottom - 24);
     return;
   }
 
   if (s.flow === "IDLE") {
-    drawButton(screenHitsEntry, ctx, 36, rowY, fullW, btnH, "GET TICKET", true, "entry");
-    drawSmallChip(screenHitsEntry, ctx, SCREEN_W - 150, 24, 114, 40, "Service", "service");
+    ctx.fillStyle = "#000080";
+    ctx.font = KFONT_META;
+    ctx.fillText(`${s.occupiedSpaces} / ${LOT_CAPACITY} spaces filled`, x0, Math.min(gateY + 22, rowY - btnH - 8));
+    if (s.playerParkedInLot) {
+      ctx.fillStyle = "#000000";
+      ctx.font = KFONT_DTL;
+      const hintY = Math.min(gateY + 24, rowY - btnH - 36);
+      wrapTextBlock(
+        ctx,
+        "Parked. Click a car to select it, arrow keys to drive. Leave via an exit kiosk.",
+        x0,
+        hintY,
+        maxW,
+        K_LH_DTL,
+        rowY - 6
+      );
+      return;
+    }
+    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Get ticket", playerAtEntryBooth, "entry");
+    drawSmallChip(hits, ctx, SCREEN_W - 128, 18, 96, 32, "Svc", "service");
     return;
   }
 
   if (s.flow === "ENTRY_PRINTING") {
-    ctx.fillStyle = "rgba(30, 85, 135, 0.9)";
-    ctx.font = '22px system-ui, sans-serif';
-    ctx.fillText("Please wait…", 36, rowY + 18);
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_MSG;
+    ctx.fillText("Printing...", x0, rowY - 8);
     return;
   }
 
   if (s.flow === "ENTRY_GATE_OPEN") {
-    ctx.fillStyle = "rgba(30, 85, 135, 0.9)";
-    ctx.font = '22px system-ui, sans-serif';
-    ctx.fillText("Remove ticket · entry gate is open", 36, rowY + 18);
+    ctx.fillStyle = "#006000";
+    ctx.font = KFONT_ACCENT;
+    if (!entryTicketPulled) {
+      wrapTextBlock(
+        ctx,
+        "Ticket saved for exit. Tap Take ticket or click the slip in the slot. Gate is open.",
+        x0,
+        gateY + 18,
+        maxW,
+        K_LH_DTL,
+        rowY - btnH - 14
+      );
+      drawButton(hits, ctx, 26, rowY, fullW, btnH, "Take ticket", true, "take_ticket");
+    } else {
+      wrapTextBlock(
+        ctx,
+        "Ticket taken. Drive in. Gate stays open until you reach a space.",
+        x0,
+        gateY + 18,
+        maxW,
+        K_LH_DTL,
+        rowY - 6
+      );
+    }
   }
 }
 
-function drawPatronScreenExit(s) {
-  const ctx = screenCanvasExit.getContext("2d");
-  screenHitsExit.length = 0;
+function drawPatronScreenExit(s, ctx = screenCanvasExit.getContext("2d"), hits = screenHitsExit) {
+  hits.length = 0;
+  const box = drawRetroShell(ctx, "Exit - PARKING.EXE");
+  const x0 = box.x;
+  const maxW = box.w;
+  const rowY = SCREEN_H - 72;
+  const btnH = 44;
+  const gap = 12;
+  const fullW = SCREEN_W - 52;
+  const halfW = (fullW - gap) / 2;
+  const textMaxY = rowY - 52;
 
-  const g = ctx.createLinearGradient(0, 0, SCREEN_W, SCREEN_H);
-  g.addColorStop(0, "#eef6f4");
-  g.addColorStop(0.5, "#e2f0ec");
-  g.addColorStop(1, "#d6eae4");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-  ctx.strokeStyle = "rgba(50, 120, 90, 0.35)";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(10, 10, SCREEN_W - 20, SCREEN_H - 20);
+  let cy = box.y;
+  ctx.fillStyle = "#000000";
+  ctx.font = KFONT_MSG;
+  cy = wrapTextBlock(ctx, s.message || "...", x0, cy, maxW, K_LH_MSG, textMaxY) + 6;
 
-  ctx.fillStyle = "#1a5a48";
-  ctx.font = '700 30px system-ui, "Segoe UI", sans-serif';
-  ctx.fillText("EXIT", 36, 48);
-  ctx.fillStyle = "rgba(35, 95, 75, 0.82)";
-  ctx.font = '20px system-ui, "Segoe UI", sans-serif';
-  ctx.fillText("Verify ticket & time · pay if required", 36, 78);
-
-  ctx.fillStyle = "rgba(35, 75, 115, 0.78)";
-  ctx.font = '22px system-ui, "Segoe UI", sans-serif';
-  const sub =
-    s.kioskStatus === "OUT_OF_SERVICE"
-      ? "Out of service"
-      : s.kioskStatus === "LIMITED"
-        ? "Limited operation"
-        : "Self-service";
-  ctx.fillText(sub, 36, 108);
-
-  ctx.fillStyle = "#1e3a58";
-  ctx.font = '26px system-ui, "Segoe UI", sans-serif';
-  wrapText(ctx, s.message || "—", 36, 142, SCREEN_W - 72, 32);
-
-  ctx.fillStyle = "rgba(25, 65, 105, 0.88)";
-  ctx.font = '20px ui-monospace, SFMono-Regular, Menlo, monospace';
-  const lines = (s.detail || "").split("\n").slice(0, 6);
-  let ly = 214;
-  for (const ln of lines) {
-    ctx.fillText(ln.slice(0, 52), 36, ly);
-    ly += 26;
+  ctx.font = KFONT_DTL;
+  for (const para of (s.detail || "").split("\n")) {
+    const t = para.trim();
+    if (!t || cy >= textMaxY) continue;
+    cy = wrapTextBlock(ctx, t, x0, cy, maxW, K_LH_DTL, textMaxY) + 4;
   }
 
-  ctx.fillStyle = "#a65c10";
-  ctx.font = '18px system-ui, sans-serif';
-  const exitOpen = s.gateOpen && s.gateMode === "exit";
-  ctx.fillText(exitOpen ? "Exit gate OPEN" : "Exit gate closed", 36, SCREEN_H - 118);
-
-  const rowY = SCREEN_H - 82;
-  const btnH = 56;
-  const gap = 18;
-  const fullW = SCREEN_W - 72;
-  const halfW = (fullW - gap) / 2;
+  ctx.fillStyle = "#000080";
+  ctx.font = KFONT_META;
+  const gateY = Math.min(cy + 10, rowY - btnH - 28);
+  const gate = s.gateOpen && s.gateMode === "exit" ? "Exit gate: OPEN" : "Exit gate: closed";
+  ctx.fillText(gate, x0, gateY);
 
   if (s.kioskStatus === "OUT_OF_SERVICE") {
-    drawButton(screenHitsExit, ctx, 36, rowY, fullW, btnH, "STAFF RESET", true, "reset");
+    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Reset", true, "reset");
     return;
   }
 
   if (s.flow === "ENTRY_PRINTING" || s.flow === "ENTRY_GATE_OPEN") {
-    ctx.fillStyle = "rgba(30, 85, 135, 0.9)";
-    ctx.font = '22px system-ui, sans-serif';
-    wrapText(ctx, "Tickets are issued at the ENTRANCE kiosk on the other side of this lane.", 36, rowY - 8, SCREEN_W - 72, 28);
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_DTL;
+    wrapTextBlock(ctx, "Get a ticket at the entry kiosk first.", x0, gateY + 22, maxW, K_LH_DTL, box.innerBottom - 24);
     return;
   }
 
   if (s.flow === "EXIT_SUMMARY") {
-    ctx.fillStyle = "rgba(30, 85, 135, 0.9)";
-    ctx.font = '22px system-ui, sans-serif';
-    ctx.fillText(s.message || "Verifying ticket…", 36, rowY + 8);
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_MSG;
+    wrapTextBlock(ctx, s.message || "Checking...", x0, gateY + 18, maxW, K_LH_MSG, rowY - 6);
     return;
   }
 
   if (s.flow === "IDLE") {
-    drawButton(screenHitsExit, ctx, 36, rowY, fullW, btnH, "EXIT (SCAN / PAY)", true, "exit");
-    drawSmallChip(screenHitsExit, ctx, SCREEN_W - 150, 24, 114, 40, "Service", "service");
+    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Exit / pay", true, "exit");
+    drawSmallChip(hits, ctx, SCREEN_W - 128, 18, 96, 32, "Svc", "service");
     return;
   }
 
   if (s.flow === "EXIT_SCAN") {
-    drawButton(screenHitsExit, ctx, 36, rowY, halfW, btnH, "SCAN TICKET", true, "scan");
-    drawButton(screenHitsExit, ctx, 36 + halfW + gap, rowY, halfW, btnH, "BACK", false, "back_exit");
+    drawButton(hits, ctx, 26, rowY, halfW, btnH, "Scan ticket", true, "scan");
+    drawButton(hits, ctx, 26 + halfW + gap, rowY, halfW, btnH, "Back", false, "back_exit");
     return;
   }
 
   if (s.flow === "EXIT_PAYMENT") {
-    drawButton(screenHitsExit, ctx, 36, rowY, halfW, btnH, "PAY (CARD)", true, "pay_ok");
-    drawButton(screenHitsExit, ctx, 36 + halfW + gap, rowY, halfW, btnH, "DECLINED (TEST)", false, "pay_bad");
+    const w3 = (fullW - gap * 2) / 3;
+    drawButton(hits, ctx, 26, rowY, w3, btnH, "Card", true, "pay_ok");
+    drawButton(hits, ctx, 26 + w3 + gap, rowY, w3, btnH, "Cash", true, "pay_cash");
+    drawButton(hits, ctx, 26 + 2 * (w3 + gap), rowY, w3, btnH, "Decline", false, "pay_bad");
     return;
   }
 
   if (s.flow === "EXIT_DONE") {
-    drawButton(screenHitsExit, ctx, 36, rowY, fullW, btnH, "CONTINUE", true, "done");
+    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Done", true, "done");
   }
 }
 
-function wrapText(ctx, text, x, y, maxW, lineH) {
-  const words = text.split(/\s+/);
+/**
+ * Word-wrap text; stops before maxY. Returns baseline after last line + lineH.
+ */
+function wrapTextBlock(ctx, text, x, y, maxW, lineH, maxY) {
+  const words = String(text || "")
+    .split(/\s+/)
+    .filter((w) => w.length);
   let line = "";
   let cy = y;
+  let lineCount = 0;
+  const maxLines = 16;
   for (let i = 0; i < words.length; i++) {
     const test = line ? `${line} ${words[i]}` : words[i];
     if (ctx.measureText(test).width > maxW && line) {
+      if (cy > maxY - lineH) return cy;
       ctx.fillText(line, x, cy);
       line = words[i];
       cy += lineH;
-      if (cy > y + lineH * 3) break;
+      lineCount++;
+      if (lineCount >= maxLines) return cy;
     } else {
       line = test;
     }
   }
-  if (line) ctx.fillText(line, x, cy);
+  if (line && cy <= maxY - lineH) {
+    ctx.fillText(line, x, cy);
+    cy += lineH;
+  }
+  return cy;
 }
 
 function drawServiceScreen() {
   const paint = (canvas, hits) => {
     const ctx = canvas.getContext("2d");
     hits.length = 0;
-    ctx.fillStyle = "#f2efe8";
-    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-    ctx.strokeStyle = "rgba(180, 110, 60, 0.4)";
-    ctx.lineWidth = 3;
-    ctx.strokeRect(10, 10, SCREEN_W - 20, SCREEN_H - 20);
+    const box = drawRetroShell(ctx, "Service - SIM.EXE");
+    const x0 = box.x;
+    let y = box.y + 8;
+    const rowH = 44;
+    const rowW = SCREEN_W - 52;
+    const rowsReserved = 7 * (rowH + 6) + 24;
+    const instructMaxY = box.innerBottom - rowsReserved;
 
-    ctx.fillStyle = "#5a3018";
-    ctx.font = '700 30px system-ui, sans-serif';
-    ctx.fillText("SERVICE (simulation)", 36, 54);
-    ctx.fillStyle = "rgba(70, 45, 28, 0.75)";
-    ctx.font = '18px system-ui, sans-serif';
-    ctx.fillText("Tap a row to toggle hardware / connectivity.", 36, 92);
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_DTL;
+    y =
+      wrapTextBlock(
+        ctx,
+        "Tap a row to toggle hardware. Random faults (demo) adds rare print or card errors.",
+        x0,
+        y,
+        rowW - 4,
+        K_LH_DTL,
+        instructMaxY
+      ) + 10;
 
     const s = engine.snapshot;
-    let y = 120;
-    const rowH = 52;
-    const rowW = SCREEN_W - 72;
     const row = (label, on, action) => {
-      ctx.fillStyle = on ? "rgba(170, 220, 190, 0.95)" : "rgba(255, 205, 205, 0.95)";
-      roundRectPath(ctx, 36, y, rowW, rowH, 12);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,0.1)";
-      ctx.stroke();
-      ctx.fillStyle = "#1a2530";
-      ctx.font = '22px system-ui, sans-serif';
+      ctx.fillStyle = on ? "#e8ffe8" : "#ffe8e8";
+      ctx.fillRect(26, y, rowW, rowH);
+      ctx.strokeStyle = "#808080";
+      ctx.strokeRect(26, y, rowW, rowH);
+      ctx.fillStyle = "#000000";
+      ctx.font = KFONT_MSG;
       ctx.textBaseline = "middle";
-      ctx.fillText(`${label}: ${on ? "ON" : "OFF"}`, 52, y + rowH / 2);
+      ctx.fillText(`${label}  ${on ? "ON" : "OFF"}`, 38, y + rowH / 2);
       ctx.textBaseline = "alphabetic";
-      hits.push({ x: 36, y, w: rowW, h: rowH, action });
-      y += rowH + 10;
+      hits.push({ x: 26, y, w: rowW, h: rowH, action });
+      y += rowH + 6;
     };
 
     row("Database", s.dbOnline, "toggle_db");
-    row("Payment gateway", s.paymentGatewayOnline, "toggle_pay");
+    row("Payments", s.paymentGatewayOnline, "toggle_pay");
     row("Ticket paper", s.ticketPaperOk, "toggle_paper");
     row("Receipt paper", s.receiptPaperOk, "toggle_receipt");
+    row("Random faults (demo)", s.simulateRandomFaults, "toggle_fault_demo");
 
-    drawButton(hits, ctx, 36, y, rowW, rowH, "SIMULATE CRITICAL FAULT (ERR-007)", false, "fault_sim");
-    y += rowH + 14;
-    drawButton(hits, ctx, 36, y, rowW, rowH, "CLOSE", true, "close_service");
+    drawButton(hits, ctx, 26, y, rowW, rowH, "Simulate fault", false, "fault_sim");
+    y += rowH + 8;
+    drawButton(hits, ctx, 26, y, rowW, rowH, "Close", true, "close_service");
   };
 
   paint(screenCanvasEntry, screenHitsEntry);
@@ -872,6 +1252,13 @@ function renderDisplay() {
     const s = engine.snapshot;
     drawPatronScreenEntry(s);
     drawPatronScreenExit(s);
+    if (popoutSource === "entry" && popoutCtx) {
+      popoutHits.length = 0;
+      drawPatronScreenEntry(s, popoutCtx, popoutHits);
+    } else if (popoutSource === "exit" && popoutCtx) {
+      popoutHits.length = 0;
+      drawPatronScreenExit(s, popoutCtx, popoutHits);
+    }
   }
   screenTexEntry.needsUpdate = true;
   screenTexExit.needsUpdate = true;
@@ -891,7 +1278,7 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
-function pickScreenPixel(clientX, clientY) {
+function raycastKioskScreen(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   const cx = clientX - rect.left;
   const cy = clientY - rect.top;
@@ -899,8 +1286,24 @@ function pickScreenPixel(clientX, clientY) {
   ndc.y = -(cy / rect.height) * 2 + 1;
   raycaster.setFromCamera(ndc, camera);
   const hits = raycaster.intersectObjects([screenEntry, screenExit], false);
-  if (!hits.length) return null;
-  const hit = hits[0];
+  return hits.length ? hits[0] : null;
+}
+
+/** Printed slip in the entry kiosk slot (only while gate open and slip not yet “taken”). */
+function raycastEntryTicketSlip(clientX, clientY) {
+  if (engine.snapshot.flow !== "ENTRY_GATE_OPEN" || entryTicketPulled || !entryTicketMesh.visible)
+    return null;
+  const rect = canvas.getBoundingClientRect();
+  ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(entryTicketMesh, false);
+  return hits.length ? hits[0] : null;
+}
+
+function pickScreenPixel(clientX, clientY) {
+  const hit = raycastKioskScreen(clientX, clientY);
+  if (!hit) return null;
   const mesh = /** @type {THREE.Mesh} */ (hit.object);
   const uv = hit.uv;
   if (!uv) return null;
@@ -909,6 +1312,18 @@ function pickScreenPixel(clientX, clientY) {
   const list = mesh === screenExit ? screenHitsExit : screenHitsEntry;
   for (const b of list) {
     if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return b.action;
+  }
+  return null;
+}
+
+function pickPopoutPixel(clientX, clientY) {
+  if (!popoutCanvasEl || !popoutSource) return null;
+  const rect = popoutCanvasEl.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return null;
+  const sx = ((clientX - rect.left) / rect.width) * SCREEN_W;
+  const sy = ((clientY - rect.top) / rect.height) * SCREEN_H;
+  for (const b of popoutHits) {
+    if (sx >= b.x && sx <= b.x + b.w && sy >= b.y && sy <= b.y + b.h) return b.action;
   }
   return null;
 }
@@ -932,8 +1347,11 @@ function runAction(action) {
     } else if (action === "toggle_receipt") {
       engine.setReceiptPaperOk(!engine.receiptPaperOk);
       engine.startup();
+    } else if (action === "toggle_fault_demo") {
+      engine.setSimulateRandomFaults(!engine.simulateRandomFaults);
     } else if (action === "fault_sim") {
       engine.triggerCriticalFault();
+      closeKioskPopout();
       uiPage = "patron";
     }
     renderDisplay();
@@ -944,12 +1362,21 @@ function runAction(action) {
   switch (action) {
     case "service":
       if (s.flow === "IDLE" && s.kioskStatus !== "OUT_OF_SERVICE") {
+        closeKioskPopout();
         uiPage = "service";
         renderDisplay();
       }
       break;
     case "entry":
-      if (s.flow === "IDLE") void engine.pressEntryButton();
+      if (!playerAtEntryBooth) break;
+      void engine.pressEntryButton();
+      renderDisplay();
+      break;
+    case "take_ticket":
+      if (s.flow === "ENTRY_GATE_OPEN" && engine.patronTakeTicketFromSlot()) {
+        entryTicketPulled = true;
+        renderDisplay();
+      }
       break;
     case "exit":
       if (s.flow === "IDLE") engine.beginExit();
@@ -961,16 +1388,25 @@ function runAction(action) {
       engine.cancelExitFlow();
       break;
     case "pay_ok":
-      void engine.pay({ approve: true });
+      void engine.pay({ method: "card", approve: true });
+      break;
+    case "pay_cash":
+      void engine.pay({ method: "cash", approve: true });
       break;
     case "pay_bad":
-      void engine.pay({ approve: false });
+      void engine.pay({ method: "card", approve: false });
       break;
-    case "done":
+    case "done": {
+      parkCelebrationShown = false;
       engine.acknowledgeExit();
+      uiPage = "patron";
+      resetPatronSimVisual();
+      renderDisplay();
       break;
+    }
     case "reset":
       engine.resetAfterFault();
+      resetPatronSimVisual();
       break;
     default:
       break;
@@ -978,8 +1414,12 @@ function runAction(action) {
 }
 
 let ptrDown = null;
+/** After tapping a kiosk mesh, the same gesture still fires `click` on `#c`; ignore one dismiss so the pop-out can stay open. */
+let skipNextPopoutDismissClick = false;
 canvas.addEventListener("pointerdown", (e) => {
   ptrDown = { x: e.clientX, y: e.clientY, t: performance.now() };
+  skipNextPopoutDismissClick = false;
+  canvas.focus();
 });
 canvas.addEventListener("pointerup", (e) => {
   if (!ptrDown) return;
@@ -989,21 +1429,121 @@ canvas.addEventListener("pointerup", (e) => {
   ptrDown = null;
   if (dx * dx + dy * dy > 100) return;
   if (dt > 1100) return;
+  const picked = pickDriveableCar(e.clientX, e.clientY);
+  if (picked) {
+    selectedDriveGroup = picked;
+    canvas.focus();
+    skipNextPopoutDismissClick = true;
+    return;
+  }
+  if (raycastEntryTicketSlip(e.clientX, e.clientY)) {
+    if (engine.snapshot.flow === "ENTRY_GATE_OPEN" && !entryTicketPulled && engine.patronTakeTicketFromSlot()) {
+      entryTicketPulled = true;
+      renderDisplay();
+    }
+    skipNextPopoutDismissClick = true;
+    return;
+  }
+  const hit3d = raycastKioskScreen(e.clientX, e.clientY);
+  if (hit3d && uiPage === "patron") {
+    const mesh = /** @type {THREE.Mesh} */ (hit3d.object);
+    if (mesh === screenEntry || mesh === screenExit) {
+      skipNextPopoutDismissClick = true;
+      if (mesh === screenEntry) {
+        if (popoutSource !== "entry") openKioskPopout("entry");
+      } else {
+        if (popoutSource !== "exit") openKioskPopout("exit");
+      }
+    }
+  }
   const action = pickScreenPixel(e.clientX, e.clientY);
   if (action) runAction(action);
 });
 
 renderDisplay();
 
+if (popoutCanvasEl) {
+  popoutCanvasEl.addEventListener("pointerup", (e) => {
+    if (e.button !== 0 && e.button !== undefined) return;
+    const action = pickPopoutPixel(e.clientX, e.clientY);
+    if (action) {
+      runAction(action);
+      renderDisplay();
+    }
+  });
+}
+
+document.addEventListener("click", (e) => {
+  if (skipNextPopoutDismissClick) {
+    skipNextPopoutDismissClick = false;
+    return;
+  }
+  if (!popoutSource || !popoutEl || popoutEl.classList.contains("kiosk-popout--hidden")) return;
+  const t = /** @type {Node | null} */ (e.target);
+  if (t && popoutEl.contains(t)) return;
+  closeKioskPopout();
+});
+
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!(e.key in keyDrive)) return;
+    e.preventDefault();
+    keyDrive[/** @type {keyof typeof keyDrive} */ (e.key)] = true;
+  },
+  { passive: false }
+);
+window.addEventListener("keyup", (e) => {
+  if (e.key in keyDrive) keyDrive[/** @type {keyof typeof keyDrive} */ (e.key)] = false;
+});
+
+function resetPatronSimVisual() {
+  playerAtEntryBooth = false;
+  prevAtEntryZone = false;
+  prevAtExitStaging = false;
+  entryTicketPulled = false;
+  parkCelebrationShown = false;
+  hideParkCelebration();
+  selectedDriveGroup = playerCarGroup;
+  playerCarGroup.position.set(wpPatronStart.x, 0, wpPatronStart.z);
+  playerCarGroup.rotation.y = wpPatronStart.ry;
+  playerCar.winL.position.y = playerCar.winR.position.y = 0.04;
+  closeKioskPopout();
+}
+
+function updateSim() {
+  const s = engine.snapshot;
+  if (s.flow !== "ENTRY_GATE_OPEN") entryTicketPulled = false;
+  entryTicketMesh.visible = s.flow === "ENTRY_GATE_OPEN" && !entryTicketPulled;
+  exitReceiptMesh.visible = s.flow === "EXIT_DONE" && s.lastPaymentMethod != null;
+
+  if (s.flow === "ENTRY_GATE_OPEN" && !s.playerParkedInLot && patronInFreeStall()) {
+    engine.markPlayerParkedInLot();
+    engine.patronFinishedEntryDrive();
+    if (!parkCelebrationShown) {
+      parkCelebrationShown = true;
+      showParkCelebration();
+    }
+    renderDisplay();
+  }
+}
+
+let lastSimFrameT = performance.now();
 function tick(t) {
+  const dt = Math.min(0.055, Math.max(0.001, (t - lastSimFrameT) / 1000));
+  lastSimFrameT = t;
   gateAngleEntry += (gateTargetAngleEntry() - gateAngleEntry) * 0.09;
   gateAngleExit += (gateTargetAngleExit() - gateAngleExit) * 0.09;
   barPivot.rotation.x = gateAngleEntry;
-  exitBarPivot.rotation.x = gateAngleExit;
+  /** Exit bar mesh extends −Z from pivot vs entry +Z — negate so both booms lift the same way */
+  exitBarPivot.rotation.x = -gateAngleExit;
+  updateKeyboardDrive(dt);
+  updateSim();
+  syncPopoutsToDriveZones();
+  applyChaseCamera();
   stars.rotation.y = t * 0.000012;
   kioskEntryGroup.rotation.y = ENTR_YAW + Math.sin(t * 0.00022) * 0.012;
   kioskExitGroup.rotation.y = EXIT_YAW + Math.sin(t * 0.00019 + 0.4) * 0.012;
-  controls.update();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
