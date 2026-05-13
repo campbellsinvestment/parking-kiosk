@@ -1,83 +1,54 @@
 # Parking Kiosk Management System
 
-A full-cycle software project built the way a Programmer Analyst works in the real world:
-requirements first, design second, code third.
+A full-cycle software project built the way a Programmer Analyst works in the real world: requirements first, design second, code third.
 
 ![Status](https://img.shields.io/badge/Status-In%20Development-blue?style=flat-square)
-![Stack](https://img.shields.io/badge/Stack-.NET%208%20%7C%20Three.js%20%7C%20SQL%20Server-informational?style=flat-square)
+![Stack](https://img.shields.io/badge/Stack-Three.js%20%7C%20ES%20modules%20%7C%20GitHub%20Pages-informational?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
 
 ---
 
-## What This Project Is
+## What This Repository Contains
 
-This project simulates a parking facility kiosk system, the kind found at hospitals, airports, and shopping centres. A patron drives in, presses a button, receives a QR-coded ticket, and the gate opens. On exit, the QR is scanned, parking duration is calculated, taxes are applied, payment is collected, and the gate opens again. Every error condition, paper jams, machine faults, payment failures, is handled with a clear message and a fallback path.
+**In the browser today:** a self-contained **3D parking kiosk demo** under `src/frontend/`. It uses [Three.js](https://threejs.org/) for the lot, entry and exit kiosks, gate booms, and vehicles. Kiosk logic (tickets, rates, tax, payments, gates, faults) runs in **`kioskEngine.js`** in memory, aligned with `docs/pseudocode.txt` and the business requirements document. There is **no network** and no server in this repo path; it is suitable for GitHub Pages and local static hosting.
 
-The kiosk interface is a 3D scene rendered in the browser using Three.js. It is backed by an ASP.NET Core 8 REST API and a SQL Server database, hosted on Windows Server via IIS.
-
----
-
-## Why This Project Exists
-
-Most developers start with code. A Programmer Analyst starts with the problem. This project was built to demonstrate that full lifecycle, from understanding what needs to be built all the way through to a working deployed application.
-
-| Phase | Deliverable | Tool |
-|---|---|---|
-| 1. Requirements | Business Requirements Document | Word |
-| 2. Logic Design | Pseudocode | Markdown |
-| 3. Process Design | Flowcharts | draw.io |
-| 4. System Design | UML Diagrams | Visual Paradigm |
-| 5. Implementation | ASP.NET Core API and Three.js Frontend | Cursor |
-| 6. Data Layer | SQL Server schema and EF Core migrations | SSMS |
-| 7. Deployment | IIS on Windows Server | Windows Server |
+**On paper / in diagrams:** requirements, pseudocode, flowcharts, UML, and sequence diagrams live in **`docs/`**. Those artifacts describe a fuller target system (API, database, hardware); the running demo implements the patron-facing flow in simplified form.
 
 ---
 
-## How the System Works
+## Live demo (GitHub Pages)
 
-**Entry**
+After [Pages is enabled](#github-pages-first-time-setup) for this repository, the site is published from the **`Deploy GitHub Pages`** workflow using the contents of **`src/frontend/`** as the site root.
 
-The patron pulls up to the entry kiosk and presses the button. The system generates a unique ticket, encodes it as a QR code with a timestamp, prints and dispenses the ticket, and raises the gate bar. The vehicle enters.
+Typical project URL:
 
-**Exit**
+`https://campbellsinvestment.github.io/parking-kiosk/`
 
-The patron drives to the exit kiosk and scans the QR ticket. The system reads the ticket, calculates how long the vehicle was parked, applies the rate tiers, adds tax, and shows the total on screen. The patron pays by card. The receipt prints and the gate opens.
-
-**When Something Goes Wrong**
-
-If the system detects a fault, it logs the error, displays a plain-language message to the patron, raises the gate so no one is trapped, and alerts staff on the admin dashboard. The patron is directed to an indoor payment booth.
+(Replace with your fork’s `https://<user>.github.io/<repo>/` if different.)
 
 ---
 
-## Architecture
+## GitHub Pages (first-time setup)
 
-```
-Browser (Kiosk Interface)
-  Three.js 3D scene
-  Entry kiosk, exit kiosk, error states, payment terminal
-        |
-        |  HTTPS / REST API / SignalR
-        |
-ASP.NET Core 8 Web API  (IIS on Windows Server)
-  TicketController
-  PaymentController
-  GateController
-  RateController
-  AdminController
-        |
-        |  Entity Framework Core
-        |
-SQL Server Database
-  Tickets, Transactions, Rates, Gates, ErrorLogs, AuditLogs
-        |
-External Services
-  Payment Gateway (Stripe or Moneris)
-  Hardware Layer (gate motor, scanner, printer via .NET serial/USB)
-```
+1. On GitHub: **Settings → Pages**.
+2. **Build and deployment → Source:** choose **GitHub Actions** (not “Deploy from a branch”).
+3. Save. Open **Actions** and confirm the **Deploy GitHub Pages** workflow succeeds on `main`.
+
+The workflow does not use `actions/configure-pages`, because that action calls the Pages API and returns **404** until Pages has been switched to GitHub Actions at least once.
 
 ---
 
-## Rate Schedule
+## How the demo works
+
+**Entry:** Drive the patron car to the entry zone, use **Get ticket** on the kiosk (or the pop-out). The sim prints a ticket, opens the gate, and you can **Take ticket** or drive in. Boom collision blocks the lane while the gate is down.
+
+**Exit:** Use **Exit / pay** at an exit kiosk, **Scan ticket**, then pay if prompted. **Done** resets the scene and closes pop-outs.
+
+**Service:** From the entry idle screen, open **Svc** to toggle database, payments, paper, receipt, or **Random faults (demo)** for stress testing.
+
+---
+
+## Rate schedule (same rules as `kioskEngine.js`)
 
 | Duration | Rate |
 |---|---|
@@ -86,171 +57,65 @@ External Services
 | 61 to 120 minutes | $4.00 |
 | Each additional hour | $2.00 |
 
-Tax rate is configurable in the admin panel. Default is Ontario HST at 13%.
+Default tax in the engine is **Ontario HST 13%** (`TAX_RATE` in `kioskEngine.js`).
 
 ---
 
-## Error Handling
+## Error codes (demo engine)
 
-| Code | Condition | What the System Does |
+| Code | Condition | Patron-facing behaviour (simplified) |
 |---|---|---|
-| ERR-001 | Paper roll empty | Halts printing, raises gate, alerts staff |
-| ERR-002 | QR scan fails 3 times | Shows manual entry option, alerts staff |
-| ERR-003 | Invalid or expired QR | Rejects ticket, logs attempt, directs to staff |
-| ERR-004 | Card declined | Allows 3 retries, then escalates to staff |
-| ERR-005 | Payment gateway offline | Raises gate, routes patron to indoor payment |
-| ERR-006 | Receipt paper out | Processes payment, skips receipt print |
-| ERR-007 | Critical hardware fault | Raises gate as fail-safe, disables kiosk |
-| ERR-008 | Network connection lost | Queues transaction locally, retries on reconnect |
+| ERR-001 | Ticket / print fault | Message, gate raised where applicable |
+| ERR-003 | Invalid QR / ticket | Reject scan, staff message |
+| ERR-004 | Card declined | Retries then escalate |
+| ERR-005 | Gateway / timeout | Connection message, fail-safe gate where set |
+| ERR-006 | Receipt printer | Payment may complete without slip |
+| ERR-007 | Critical fault (sim) | Out of service |
+| ERR-008 | Database offline at startup | Out of service |
 
 ---
 
-## Tech Stack
-
-**Frontend**
-- Three.js for 3D kiosk rendering in the browser via WebGL
-- Vanilla JavaScript with ES Modules
-- Served as static files by ASP.NET Core
-
-**Backend**
-- ASP.NET Core 8 Web API
-- Entity Framework Core 8
-- SignalR for real-time gate status and admin updates
-- JWT for admin authentication
-
-**Database**
-- Microsoft SQL Server
-- Code-first migrations via EF Core
-
-**Infrastructure**
-- Windows Server with IIS
-- HTTPS via TLS 1.2 or higher
-- Stripe or Moneris for payment processing
-
-**Dev Tools**
-- Cursor for AI-assisted coding
-- Visual Paradigm for UML diagrams
-- draw.io for flowcharts
-- GitHub for version control
-
----
-
-## Repository Structure
+## Repository structure
 
 ```
-parking-kiosk-system/
-|
-|-- README.md
-|
-|-- docs/
-|   |-- PKS-BRD-001.docx             Business Requirements Document
-|   |-- pseudocode.txt               Plain-language logic before code
-|   |-- class_diagram.svg            UML class diagram
-|   |-- erd_database_schema.html     Entity relationship diagram
-|   |-- sequence_entry.svg           Sequence diagram for entry flow
-|   |-- sequence_exit_payment.svg    Sequence diagram for exit/payment flow
-|   |-- diagrams/
-|       |-- flowchart-entry.drawio
-|       |-- flowchart-exit.drawio
-|       |-- flowchart-error.drawio
-|
-|-- src/
-|   |-- backend/
-|   |   |-- ParkingKiosk.API           ASP.NET Core Web API
-|   |   |-- ParkingKiosk.Core          Domain models and interfaces
-|   |   |-- ParkingKiosk.Infrastructure  EF Core, payment, hardware
-|   |   |-- ParkingKiosk.Tests         Unit and integration tests
-|   |
-|   |-- frontend/
-|       |-- index.html
-|       |-- main.js                    Three.js entry point
-|       |-- scenes/
-|       |   |-- EntryKiosk.js
-|       |   |-- ExitKiosk.js
-|       |   |-- ErrorState.js
-|       |-- api/
-|           |-- kioskApi.js            Fetch wrapper for the .NET API
-|
-|-- database/
-    |-- schema.sql                     Table definitions
-    |-- seed.sql                       Rate schedule seed data
+parking-kiosk/
+├── .github/workflows/deploy-pages.yml   # Publishes src/frontend to GitHub Pages
+├── docs/                                 # BRD, pseudocode, diagrams, flowcharts
+├── src/frontend/
+│   ├── index.html                        # Canvas + celebration overlay + kiosk pop-out
+│   ├── main.js                           # Three.js scene, input, UI painting
+│   ├── kioskEngine.js                    # Ticket, payment, gate state machine
+│   └── styles.css                        # Pop-out and celebration styling
+└── README.md
 ```
 
 ---
 
-## Getting Started
+## Local development
 
-**Prerequisites**
-- .NET 8 SDK
-- SQL Server Express
-- Node.js
-- Git
-
-**Clone the repo**
-```bash
-git clone https://github.com/YOUR-USERNAME/parking-kiosk-system.git
-cd parking-kiosk-system
-```
-
-**Set up the database**
-
-Update the connection string in `src/backend/ParkingKiosk.API/appsettings.json`, then run:
-```bash
-cd src/backend/ParkingKiosk.API
-dotnet ef database update
-```
-
-**Run the API**
-```bash
-dotnet run --project src/backend/ParkingKiosk.API
-```
-The API will be available at `https://localhost:7001`
-
-**Open the frontend**
-
-Open `src/frontend/index.html` in a browser, or use the Live Server extension in Cursor.
-
----
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | /api/tickets | Generate a new entry ticket and QR code |
-| GET | /api/tickets/{id} | Retrieve a ticket by ID |
-| POST | /api/tickets/{id}/scan | Scan QR at exit and calculate fee |
-| POST | /api/payments | Process a card payment |
-| GET | /api/rates | Get the current rate schedule |
-| PUT | /api/rates | Update the rate schedule (admin) |
-| POST | /api/gates/{id}/open | Manual gate override (admin) |
-| GET | /api/admin/transactions | Pull transaction report (admin) |
-| GET | /api/health | System health check |
-
----
-
-## Security
-
-- Card data is never stored in this application. All card handling goes through a PCI-DSS compliant payment gateway.
-- Admin endpoints require a valid JWT Bearer token.
-- All communication runs over HTTPS with TLS 1.2 or higher.
-- All database queries use EF Core parameterized statements to prevent SQL injection.
-
----
-
-## Running Tests
+No build step. Any static file server from `src/frontend` works.
 
 ```bash
-dotnet test src/backend/ParkingKiosk.Tests
+cd src/frontend
+# e.g. Python 3
+python3 -m http.server 8080
 ```
 
-Tests cover ticket generation, QR encoding, fee calculation across all rate tiers, tax calculation, error state transitions, and gate control logic.
+Open `http://localhost:8080`. Or open `index.html` via your editor’s live preview if relative module paths are supported.
 
+The page loads **Three.js from jsDelivr** (see `importmap` in `index.html`).
 
 ---
 
-## About This Project
+## Target production architecture (BRD / docs)
 
-This was built as a Programmer Analyst portfolio piece. The goal was not just to write code but to show the thinking that happens before code gets written. Every design decision in this repo has a requirement behind it, and every requirement came from understanding the problem first.
+The **docs** folder describes a larger system: ASP.NET Core API, SQL Server, IIS, payment gateway, and hardware. That stack is **not** present in this repository yet; the frontend demo is the implemented slice you can run and share today.
+
+---
+
+## Why this project exists
+
+Most developers start with code. A Programmer Analyst starts with the problem. This repo shows the lifecycle from requirements and diagrams through a **working browser demo**, with room to grow into the full backend described in the documentation.
 
 Connect on [LinkedIn](https://linkedin.com/in/stepocampbell).
 
@@ -258,4 +123,4 @@ Connect on [LinkedIn](https://linkedin.com/in/stepocampbell).
 
 ## License
 
-MIT License. See LICENSE for details.
+MIT License.

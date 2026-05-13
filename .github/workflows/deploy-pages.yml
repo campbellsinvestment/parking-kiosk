@@ -1,5 +1,11 @@
 # Deploy static Three.js kiosk from src/frontend to GitHub Pages.
-# After first push: Repo Settings → Pages → Build and deployment → Source: GitHub Actions.
+#
+# First-time setup (required once, or deploy will fail):
+#   Repository Settings → Pages → Build and deployment → Source: "GitHub Actions"
+# Do not use "Deploy from a branch" while this workflow is your publisher.
+#
+# This workflow intentionally does NOT use actions/configure-pages: that step calls
+# GET /repos/{owner}/{repo}/pages and returns 404 until Pages is enabled as above.
 name: Deploy GitHub Pages
 
 on:
@@ -24,8 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
