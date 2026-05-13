@@ -12,7 +12,7 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #cfe8f0;
+  background: #d2ecff;
 }
 
 #c {
@@ -26,6 +26,121 @@ body {
 
 #c:active {
   cursor: grabbing;
+}
+
+/* On-screen drive + camera hints (does not block clicks on the canvas) */
+.drive-hint {
+  position: fixed;
+  z-index: 60;
+  left: 50%;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  max-width: min(94vw, 440px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.drive-hint__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px 14px;
+  border-radius: 12px;
+  border: 2px solid #14532d;
+  background: rgba(248, 250, 252, 0.94);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.28);
+  color: #0f172a;
+  font: 600 13px/1.45 Tahoma, "MS Sans Serif", system-ui, sans-serif;
+}
+
+.drive-hint--hidden {
+  display: none;
+}
+
+.drive-hint__arrows {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  filter: drop-shadow(0 2px 2px rgba(15, 23, 42, 0.2));
+}
+
+.drive-hint__mid {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+}
+
+.drive-hint__chev {
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  color: #14532d;
+  opacity: 0.92;
+}
+
+.drive-hint__chev--up {
+  margin-bottom: -2px;
+}
+
+.drive-hint__chev--down {
+  margin-top: -2px;
+}
+
+.drive-hint__caption {
+  margin: 0;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+
+.drive-hint__kbd {
+  display: inline-block;
+  padding: 1px 6px 2px;
+  font: 700 12px/1.2 "Courier New", Courier, monospace;
+  color: #0f172a;
+  background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
+  border: 2px solid #334155;
+  border-radius: 4px;
+  box-shadow: 0 1px 0 #fff inset;
+}
+
+/* Help / settings: reopen drive + camera instructions (patron only) */
+.help-settings {
+  position: fixed;
+  z-index: 72;
+  top: max(10px, env(safe-area-inset-top));
+  right: max(10px, env(safe-area-inset-right));
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #14532d;
+  border-radius: 50%;
+  background: rgba(248, 250, 252, 0.94);
+  color: #14532d;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.22);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.help-settings:hover {
+  filter: brightness(0.97);
+}
+
+.help-settings:focus-visible {
+  outline: 2px solid #14532d;
+  outline-offset: 3px;
+}
+
+.help-settings--hidden {
+  display: none;
+}
+
+.help-settings__icon {
+  display: block;
 }
 
 /* CRT / TV pop-out (same aspect as kiosk texture) */

@@ -1,23 +1,24 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { KioskEngine, LOT_CAPACITY } from "./kioskEngine.js";
+import { KioskEngine } from "./kioskEngine.js";
 
 const SCREEN_W = 960;
 const SCREEN_H = 540;
 
-/** Kiosk canvas typography (Win9x-style): one family, fixed sizes */
-const KFONT = 'Tahoma, "MS Sans Serif", sans-serif';
-const KFONT_TITLE = `bold 17px ${KFONT}`;
-const KFONT_BTN = `bold 17px ${KFONT}`;
-const KFONT_MSG = `17px ${KFONT}`;
-const KFONT_DTL = `15px ${KFONT}`;
-const KFONT_META = `14px ${KFONT}`;
-const KFONT_ACCENT = `bold 15px ${KFONT}`;
-const K_LH_MSG = 22;
-const K_LH_DTL = 19;
-const K_LH_META = 18;
+/** Fixed-pitch readout (DOS-era kiosk). */
+const KFONT = '"Courier New", Courier, "Lucida Console", monospace';
+const KFONT_TITLE = `bold 15px ${KFONT}`;
+const KFONT_BTN = `bold 15px ${KFONT}`;
+const KFONT_MSG = `15px ${KFONT}`;
+const KFONT_DTL = `13px ${KFONT}`;
+const KFONT_ACCENT = `bold 13px ${KFONT}`;
+const K_LH_MSG = 18;
+const K_LH_DTL = 15;
+const K_LH_HINT = 15;
 
 const canvas = document.getElementById("c");
+const driveHintEl = document.getElementById("drive-hint");
+const helpSettingsBtn = document.getElementById("help-settings");
 const popoutEl = document.getElementById("kiosk-popout");
 const popoutCanvasEl = /** @type {HTMLCanvasElement | null} */ (document.getElementById("kiosk-popout-canvas"));
 /** @type {CanvasRenderingContext2D | null} */
@@ -34,6 +35,40 @@ const parkCelebrationOkEl = document.getElementById("park-celebration-ok");
 let parkCelebrationShown = false;
 /** After ENTRY_GATE_OPEN, slip hidden until next print cycle (3D + UI). */
 let entryTicketPulled = false;
+
+/** Patron help card: auto-hide after this; reopen via #help-settings. */
+const DRIVE_HINT_AUTOCLOSE_MS = 11_000;
+let driveHintHideTimerId = 0;
+
+function clearDriveHintHideTimer() {
+  if (driveHintHideTimerId !== 0) {
+    clearTimeout(driveHintHideTimerId);
+    driveHintHideTimerId = 0;
+  }
+}
+
+function hideDriveHintPanel() {
+  clearDriveHintHideTimer();
+  if (!driveHintEl) return;
+  driveHintEl.classList.add("drive-hint--hidden");
+  driveHintEl.setAttribute("aria-hidden", "true");
+}
+
+function scheduleDriveHintAutoHide() {
+  clearDriveHintHideTimer();
+  if (!driveHintEl || uiPage !== "patron") return;
+  driveHintHideTimerId = window.setTimeout(() => {
+    driveHintHideTimerId = 0;
+    hideDriveHintPanel();
+  }, DRIVE_HINT_AUTOCLOSE_MS);
+}
+
+function showDriveHintPanelAndSchedule() {
+  if (!driveHintEl || uiPage !== "patron") return;
+  driveHintEl.classList.remove("drive-hint--hidden");
+  driveHintEl.setAttribute("aria-hidden", "false");
+  scheduleDriveHintAutoHide();
+}
 
 function hideParkCelebration() {
   if (!parkCelebrationEl) return;
@@ -62,8 +97,12 @@ const screenTexEntry = new THREE.CanvasTexture(screenCanvasEntry);
 const screenTexExit = new THREE.CanvasTexture(screenCanvasExit);
 screenTexEntry.colorSpace = THREE.SRGBColorSpace;
 screenTexExit.colorSpace = THREE.SRGBColorSpace;
-screenTexEntry.minFilter = screenTexExit.minFilter = THREE.LinearFilter;
-screenTexEntry.magFilter = screenTexExit.magFilter = THREE.LinearFilter;
+screenTexEntry.minFilter = screenTexExit.minFilter = THREE.NearestFilter;
+screenTexEntry.magFilter = screenTexExit.magFilter = THREE.NearestFilter;
+for (const c of [screenCanvasEntry, screenCanvasExit]) {
+  const xctx = c.getContext("2d");
+  if (xctx) xctx.imageSmoothingEnabled = false;
+}
 
 /** Patron drive sim (must exist before KioskEngine — startup calls renderDisplay). */
 /** Patron at entry kiosk zone (patron car only). */
@@ -77,24 +116,26 @@ engine.startup();
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setClearColor(0xd8e8f4, 1);
+renderer.setClearColor(0xbfe8ff, 1);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 
 const scene = new THREE.Scene();
-/** Softer distance fog — pairs with gradient sky */
-scene.fog = new THREE.Fog(0xc5dae8, 22, 130);
+/** Softer distance fog — bright summer haze */
+scene.fog = new THREE.Fog(0xd4ecff, 35, 155);
 
-/** Gradient sky (canvas → texture) */
+/** Gradient sky (canvas → texture) — bright sunny day */
 const skyC = document.createElement("canvas");
 skyC.width = 2;
 skyC.height = 512;
 const sctx = skyC.getContext("2d");
 const sg = sctx.createLinearGradient(0, 0, 0, 512);
-sg.addColorStop(0, "#7ec0ff");
-sg.addColorStop(0.35, "#b8daf5");
-sg.addColorStop(0.72, "#ddeef8");
-sg.addColorStop(1, "#f2f6f9");
+sg.addColorStop(0, "#38a8ff");
+sg.addColorStop(0.22, "#7dd3fc");
+sg.addColorStop(0.48, "#b8e8ff");
+sg.addColorStop(0.72, "#fff4c8");
+sg.addColorStop(0.88, "#fff8e6");
+sg.addColorStop(1, "#fffef5");
 sctx.fillStyle = sg;
 sctx.fillRect(0, 0, 2, 512);
 const skyTex = new THREE.CanvasTexture(skyC);
@@ -174,6 +215,8 @@ const connSouthZc = (zConnS0 + zConnS1) * 0.5;
 const connNorthZc = (zConnN0 + zConnN1) * 0.5;
 const connX1 = xLotSlabRight + 0.12;
 const connX2 = roadCenterX - roadHalfW - 0.06;
+/** After EXIT_DONE, selected car past this +X leaves the lot (connector toward main road) — auto-finishes exit. */
+const EXIT_COMPLETE_DRIVEOUT_X = connX2 + 2.8;
 const connXC = (connX1 + connX2) * 0.5;
 const connLenX = Math.max(0.45, connX2 - connX1);
 /** Each boom spans from its lane edge to the connector center (Z = GATE_Z); tips meet in the middle */
@@ -204,7 +247,7 @@ const CAM_TARGET_Z = GATE_Z;
 
 const camera = new THREE.PerspectiveCamera(48, 1, 0.04, 220);
 
-const controls = new OrbitControls(camera, canvas);
+const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(CAM_TARGET_X, 1.32, CAM_TARGET_Z);
 controls.enableDamping = false;
 controls.enableRotate = false;
@@ -213,11 +256,36 @@ controls.enableZoom = false;
 controls.enabled = false;
 controls.minDistance = 0.09;
 controls.maxDistance = 95;
-controls.minPolarAngle = Math.PI * 0.08;
-controls.maxPolarAngle = Math.PI * 0.55;
+/** Wide enough that chase → manual handoff is not clamped every frame (which killed drag). */
+controls.minPolarAngle = Math.PI * 0.04;
+controls.maxPolarAngle = Math.PI - 0.1;
 controls.screenSpacePanning = true;
 controls.panSpeed = 0.65;
 controls.rotateSpeed = 0.62;
+
+/** V = orbit / zoom / pan; V again = chase cam behind car (default). */
+let manualCameraView = false;
+/** Same focal point `applyChaseCamera` uses so orbit starts from the current chase view. */
+function syncOrbitTargetToChaseLookAt() {
+  const car = selectedDriveGroup;
+  if (car) {
+    const lookY = car.position.y + 0.92;
+    controls.target.set(car.position.x, lookY, car.position.z);
+  } else {
+    controls.target.set(CAM_TARGET_X, 1.32, CAM_TARGET_Z);
+  }
+}
+function setManualCameraView(on) {
+  manualCameraView = !!on;
+  controls.enabled = manualCameraView;
+  controls.enableRotate = manualCameraView;
+  controls.enablePan = manualCameraView;
+  controls.enableZoom = manualCameraView;
+  if (manualCameraView) {
+    syncOrbitTargetToChaseLookAt();
+    controls.update();
+  }
+}
 
 function closeKioskPopout() {
   popoutSource = null;
@@ -236,9 +304,15 @@ function openKioskPopout(which) {
 }
 
 window.addEventListener("keydown", (e) => {
-  if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.repeat) return;
   const t = /** @type {HTMLElement | null} */ (e.target);
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "v" || e.key === "V") {
+    e.preventDefault();
+    setManualCameraView(!manualCameraView);
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === "Escape") {
     e.preventDefault();
     if (parkCelebrationEl && !parkCelebrationEl.classList.contains("park-celebration--hidden")) {
@@ -254,23 +328,23 @@ const entryGapZ0 = GATE_Z - connPavementZHalf - 0.14;
 const entryGapZ1 = GATE_Z + connPavementZHalf + 0.14;
 
 /** Lights — open-air lot */
-const hemi = new THREE.HemisphereLight(0xe8f4ff, 0x8faa90, 0.95);
+const hemi = new THREE.HemisphereLight(0xd8f0ff, 0xa6d4a0, 1.05);
 scene.add(hemi);
-const key = new THREE.DirectionalLight(0xfffaf0, 1.25);
-key.position.set(5, 12, 6);
+const key = new THREE.DirectionalLight(0xfffef5, 1.45);
+key.position.set(22, 38, 14);
 key.castShadow = true;
 key.shadow.mapSize.set(1024, 1024);
 key.shadow.bias = -0.0002;
 scene.add(key);
-const rim = new THREE.PointLight(0x9ec0ff, 0.45, 18);
-rim.position.set(-3, 3, 2);
+const rim = new THREE.PointLight(0xffe8c8, 0.35, 28);
+rim.position.set(8, 14, -6);
 scene.add(rim);
 
 /** Distant hills (simple scenic silhouettes) */
 const hillMat = new THREE.MeshStandardMaterial({
-  color: 0x6d9d78,
+  color: 0x7ec87a,
   metalness: 0,
-  roughness: 0.92,
+  roughness: 0.9,
   flatShading: true,
 });
 for (let i = 0; i < 9; i++) {
@@ -285,7 +359,7 @@ for (let i = 0; i < 9; i++) {
 /** Grass — base ground (sits slightly low so asphalt reads on top) */
 const grass = new THREE.Mesh(
   new THREE.PlaneGeometry(260, 260),
-  new THREE.MeshStandardMaterial({ color: 0x5c8f66, metalness: 0, roughness: 0.94 })
+  new THREE.MeshStandardMaterial({ color: 0x6ab97a, metalness: 0, roughness: 0.9 })
 );
 grass.rotation.x = -Math.PI / 2;
 grass.position.y = -0.04;
@@ -326,7 +400,7 @@ sideRoadNorth.receiveShadow = true;
 scene.add(sideRoadNorth);
 const medianGrass = new THREE.Mesh(
   new THREE.BoxGeometry(connLenX, 0.07, connectorMedianZ),
-  new THREE.MeshStandardMaterial({ color: 0x548a5e, metalness: 0, roughness: 0.94 })
+  new THREE.MeshStandardMaterial({ color: 0x62b06e, metalness: 0, roughness: 0.92 })
 );
 medianGrass.position.set(connXC, 0.038, GATE_Z);
 medianGrass.receiveShadow = true;
@@ -401,6 +475,91 @@ addFenceRunZ(xFenceL, zFenceS, zFenceN);
 /** South + north continuous */
 addFenceRunX(zFenceS, xFenceL, xFenceR);
 addFenceRunX(zFenceN, xFenceL, xFenceR);
+
+/** Perimeter trees + shrubs outside the fence — bright summer lot edge */
+const trunkMatTree = new THREE.MeshStandardMaterial({ color: 0x5c4030, roughness: 0.96, metalness: 0 });
+const leafMatTree = new THREE.MeshStandardMaterial({
+  color: 0x2a7a3e,
+  roughness: 0.88,
+  metalness: 0,
+  flatShading: true,
+});
+const shrubMat = new THREE.MeshStandardMaterial({
+  color: 0x4a9a55,
+  roughness: 0.9,
+  metalness: 0,
+  flatShading: true,
+});
+function makeTreeInstance(scl) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.11 * scl, 0.15 * scl, 1.0 * scl, 8), trunkMatTree);
+  trunk.position.y = 0.5 * scl;
+  trunk.castShadow = true;
+  g.add(trunk);
+  for (let lyr = 0; lyr < 3; lyr++) {
+    const cone = new THREE.Mesh(new THREE.ConeGeometry((0.9 - lyr * 0.2) * scl, 1.15 * scl, 8), leafMatTree);
+    cone.position.y = scl * (1.0 + 0.4 + lyr * 0.78);
+    cone.castShadow = true;
+    g.add(cone);
+  }
+  return g;
+}
+const treeOx = 3.2;
+const treeOz = 3.2;
+const treeStepN = 5;
+for (let i = 0; i < treeStepN; i++) {
+  const u = i / Math.max(1, treeStepN - 1);
+  const x = xFenceL - treeOx + (xFenceR - xFenceL + treeOx * 2) * u + (Math.random() - 0.5) * 0.65;
+  const tN = makeTreeInstance(0.92 + Math.random() * 0.28);
+  tN.position.set(x, 0, zFenceN + treeOz + Math.random() * 1.2);
+  tN.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(tN);
+  const tS = makeTreeInstance(0.88 + Math.random() * 0.26);
+  tS.position.set(x + 0.45, 0, zFenceS - treeOz - Math.random() * 1.1);
+  tS.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(tS);
+}
+const treeStepW = 4;
+for (let j = 0; j < treeStepW; j++) {
+  const z = zFenceS + ((zFenceN - zFenceS) * j) / Math.max(1, treeStepW - 1);
+  const tW = makeTreeInstance(0.85 + Math.random() * 0.32);
+  tW.position.set(xFenceL - treeOx - Math.random(), 0, z + (Math.random() - 0.5) * 1.4);
+  tW.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(tW);
+}
+const eastTreeX = xFenceR + treeOx;
+for (let ei = 0; ei < treeStepW; ei++) {
+  const z = zFenceS + 3 + ((zFenceN - 3) - (zFenceS + 3)) * (ei / Math.max(1, treeStepW - 1));
+  if (z > entryGapZ0 - 1.2 && z < entryGapZ1 + 1.2) continue;
+  const tE = makeTreeInstance(0.82 + Math.random() * 0.3);
+  tE.position.set(eastTreeX + Math.random() * 1.5, 0, z + (Math.random() - 0.5) * 0.7);
+  tE.rotation.y = Math.random() * Math.PI * 2;
+  scene.add(tE);
+}
+for (let k = 0; k < 28; k++) {
+  const bush = new THREE.Mesh(new THREE.SphereGeometry(0.35 + Math.random() * 0.2, 6, 5), shrubMat);
+  const side = k % 4;
+  let bx;
+  let bz;
+  if (side === 0) {
+    bx = xFenceL - treeOx * 0.55 + Math.random() * 0.45;
+    bz = zFenceS + Math.random() * (zFenceN - zFenceS);
+  } else if (side === 1) {
+    bx = xFenceR + treeOx * 0.55 + Math.random() * 0.55;
+    bz = zFenceS + Math.random() * (zFenceN - zFenceS);
+    if (bz > entryGapZ0 && bz < entryGapZ1) continue;
+  } else if (side === 2) {
+    bx = xFenceL + Math.random() * (xFenceR - xFenceL);
+    bz = zFenceN + treeOz * 0.45 + Math.random() * 0.55;
+  } else {
+    bx = xFenceL + Math.random() * (xFenceR - xFenceL);
+    bz = zFenceS - treeOz * 0.45 - Math.random() * 0.55;
+  }
+  bush.position.set(bx, 0.2 + Math.random() * 0.08, bz);
+  bush.scale.setScalar(0.85 + Math.random() * 0.25);
+  bush.castShadow = true;
+  scene.add(bush);
+}
 
 /** Parking lot slab — west + east stall areas + room for center drive */
 const lotAsphalt = new THREE.MeshStandardMaterial({ color: 0x565c66, metalness: 0.1, roughness: 0.88 });
@@ -590,7 +749,7 @@ for (let i = 0; i < starCount; i++) {
 starGeo.setAttribute("position", new THREE.BufferAttribute(sp, 3));
 const stars = new THREE.Points(
   starGeo,
-  new THREE.PointsMaterial({ color: 0xffffff, size: 0.04, transparent: true, opacity: 0.22, depthWrite: false })
+  new THREE.PointsMaterial({ color: 0xffffff, size: 0.035, transparent: true, opacity: 0.06, depthWrite: false })
 );
 scene.add(stars);
 
@@ -692,14 +851,38 @@ function xzDistSq(ax, az, bx, bz) {
 }
 
 function patronInFreeStall() {
-  return (
-    Math.abs(playerCarGroup.position.x - patronStallX) < patronStallHalfX &&
-    Math.abs(playerCarGroup.position.z - patronStallZ) < patronStallHalfZ
-  );
+  for (let i = 0; i < driveableCars.length; i++) {
+    const g = driveableCars[i];
+    if (
+      Math.abs(g.position.x - patronStallX) < patronStallHalfX &&
+      Math.abs(g.position.z - patronStallZ) < patronStallHalfZ
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function carInEntryZone(g) {
-  return g === playerCarGroup && xzDistSq(g.position.x, g.position.z, ENTRY_ZONE.x, ENTRY_ZONE.z) <= ENTRY_ZONE.rSq;
+  return !!(
+    g &&
+    g.userData?.driveable &&
+    xzDistSq(g.position.x, g.position.z, ENTRY_ZONE.x, ENTRY_ZONE.z) <= ENTRY_ZONE.rSq
+  );
+}
+
+function anyDriveableCarInEntryZone() {
+  for (let i = 0; i < driveableCars.length; i++) {
+    if (carInEntryZone(driveableCars[i])) return true;
+  }
+  return false;
+}
+
+function anyDriveablePastExitDriveOutLine() {
+  for (let i = 0; i < driveableCars.length; i++) {
+    if (driveableCars[i].position.x >= EXIT_COMPLETE_DRIVEOUT_X) return true;
+  }
+  return false;
 }
 
 function carInAnyExitStaging(g) {
@@ -779,7 +962,7 @@ let prevAtExitStaging = false;
 
 function syncPopoutsToDriveZones() {
   if (uiPage !== "patron") return;
-  const atEntry = carInEntryZone(playerCarGroup);
+  const atEntry = anyDriveableCarInEntryZone();
   playerAtEntryBooth = atEntry;
   if (atEntry && popoutSource !== "entry") openKioskPopout("entry");
   const exitPick = selectedDriveGroup && carInAnyExitStaging(selectedDriveGroup);
@@ -989,6 +1172,7 @@ function drawSmallChip(hits, ctx, x, y, w, h, label, action) {
 
 function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits = screenHitsEntry) {
   hits.length = 0;
+  ctx.imageSmoothingEnabled = false;
   const box = drawRetroShell(ctx, "Entry - PARKING.EXE");
   const x0 = box.x;
   const maxW = box.w;
@@ -1009,11 +1193,7 @@ function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits
     cy = wrapTextBlock(ctx, t, x0, cy, maxW, K_LH_DTL, textMaxY) + 4;
   }
 
-  ctx.fillStyle = "#000080";
-  ctx.font = KFONT_META;
-  const gateY = Math.min(cy + 10, rowY - btnH - 28);
-  const gate = s.gateOpen && s.gateMode === "entry" ? "Entry gate: OPEN" : "Entry gate: closed";
-  ctx.fillText(gate, x0, gateY);
+  const hintTop = Math.min(cy + 10, rowY - btnH - 40);
 
   if (s.kioskStatus === "OUT_OF_SERVICE") {
     drawButton(hits, ctx, 26, rowY, fullW, btnH, "Reset", true, "reset");
@@ -1023,27 +1203,15 @@ function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits
   if (s.flow === "EXIT_SCAN" || s.flow === "EXIT_PAYMENT" || s.flow === "EXIT_DONE") {
     ctx.fillStyle = "#000000";
     ctx.font = KFONT_DTL;
-    wrapTextBlock(ctx, "Use an exit kiosk in the lot to scan and pay.", x0, gateY + K_LH_META, maxW, K_LH_DTL, box.innerBottom - 24);
+    wrapTextBlock(ctx, "USE EXIT KIOSK IN LOT.", x0, hintTop, maxW, K_LH_HINT, box.innerBottom - 24);
     return;
   }
 
   if (s.flow === "IDLE") {
-    ctx.fillStyle = "#000080";
-    ctx.font = KFONT_META;
-    ctx.fillText(`${s.occupiedSpaces} / ${LOT_CAPACITY} spaces filled`, x0, Math.min(gateY + 22, rowY - btnH - 8));
     if (s.playerParkedInLot) {
       ctx.fillStyle = "#000000";
       ctx.font = KFONT_DTL;
-      const hintY = Math.min(gateY + 24, rowY - btnH - 36);
-      wrapTextBlock(
-        ctx,
-        "Parked. Click a car to select it, arrow keys to drive. Leave via an exit kiosk.",
-        x0,
-        hintY,
-        maxW,
-        K_LH_DTL,
-        rowY - 6
-      );
+      wrapTextBlock(ctx, "PARKED. CLICK CAR. ARROWS=DRIVE. EXIT=LOT.", x0, hintTop, maxW, K_LH_HINT, rowY - 6);
       return;
     }
     drawButton(hits, ctx, 26, rowY, fullW, btnH, "Get ticket", playerAtEntryBooth, "entry");
@@ -1054,7 +1222,7 @@ function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits
   if (s.flow === "ENTRY_PRINTING") {
     ctx.fillStyle = "#000000";
     ctx.font = KFONT_MSG;
-    ctx.fillText("Printing...", x0, rowY - 8);
+    ctx.fillText("PRINTING...", x0, rowY - 8);
     return;
   }
 
@@ -1064,30 +1232,23 @@ function drawPatronScreenEntry(s, ctx = screenCanvasEntry.getContext("2d"), hits
     if (!entryTicketPulled) {
       wrapTextBlock(
         ctx,
-        "Ticket saved for exit. Tap Take ticket or click the slip in the slot. Gate is open.",
+        "TICKET OK. TAP TAKE OR CLICK SLIP.",
         x0,
-        gateY + 18,
+        hintTop,
         maxW,
-        K_LH_DTL,
+        K_LH_HINT,
         rowY - btnH - 14
       );
       drawButton(hits, ctx, 26, rowY, fullW, btnH, "Take ticket", true, "take_ticket");
     } else {
-      wrapTextBlock(
-        ctx,
-        "Ticket taken. Drive in. Gate stays open until you reach a space.",
-        x0,
-        gateY + 18,
-        maxW,
-        K_LH_DTL,
-        rowY - 6
-      );
+      wrapTextBlock(ctx, "GO. DRIVE IN.", x0, hintTop, maxW, K_LH_HINT, rowY - 6);
     }
   }
 }
 
 function drawPatronScreenExit(s, ctx = screenCanvasExit.getContext("2d"), hits = screenHitsExit) {
   hits.length = 0;
+  ctx.imageSmoothingEnabled = false;
   const box = drawRetroShell(ctx, "Exit - PARKING.EXE");
   const x0 = box.x;
   const maxW = box.w;
@@ -1110,11 +1271,7 @@ function drawPatronScreenExit(s, ctx = screenCanvasExit.getContext("2d"), hits =
     cy = wrapTextBlock(ctx, t, x0, cy, maxW, K_LH_DTL, textMaxY) + 4;
   }
 
-  ctx.fillStyle = "#000080";
-  ctx.font = KFONT_META;
-  const gateY = Math.min(cy + 10, rowY - btnH - 28);
-  const gate = s.gateOpen && s.gateMode === "exit" ? "Exit gate: OPEN" : "Exit gate: closed";
-  ctx.fillText(gate, x0, gateY);
+  const hintTop = Math.min(cy + 10, rowY - btnH - 40);
 
   if (s.kioskStatus === "OUT_OF_SERVICE") {
     drawButton(hits, ctx, 26, rowY, fullW, btnH, "Reset", true, "reset");
@@ -1124,14 +1281,14 @@ function drawPatronScreenExit(s, ctx = screenCanvasExit.getContext("2d"), hits =
   if (s.flow === "ENTRY_PRINTING" || s.flow === "ENTRY_GATE_OPEN") {
     ctx.fillStyle = "#000000";
     ctx.font = KFONT_DTL;
-    wrapTextBlock(ctx, "Get a ticket at the entry kiosk first.", x0, gateY + 22, maxW, K_LH_DTL, box.innerBottom - 24);
+    wrapTextBlock(ctx, "NEED ENTRY TICKET FIRST.", x0, hintTop, maxW, K_LH_HINT, box.innerBottom - 24);
     return;
   }
 
   if (s.flow === "EXIT_SUMMARY") {
     ctx.fillStyle = "#000000";
     ctx.font = KFONT_MSG;
-    wrapTextBlock(ctx, s.message || "Checking...", x0, gateY + 18, maxW, K_LH_MSG, rowY - 6);
+    wrapTextBlock(ctx, s.message || "WAIT...", x0, hintTop, maxW, K_LH_MSG, rowY - 6);
     return;
   }
 
@@ -1156,7 +1313,18 @@ function drawPatronScreenExit(s, ctx = screenCanvasExit.getContext("2d"), hits =
   }
 
   if (s.flow === "EXIT_DONE") {
-    drawButton(hits, ctx, 26, rowY, fullW, btnH, "Done", true, "done");
+    ctx.fillStyle = "#000000";
+    ctx.font = KFONT_DTL;
+    wrapTextBlock(
+      ctx,
+      "GATE OPEN. DRIVE OUT ONTO THE ROAD — SESSION ENDS WHEN YOU LEAVE.",
+      x0,
+      hintTop,
+      maxW,
+      K_LH_HINT,
+      box.innerBottom - 24
+    );
+    return;
   }
 }
 
@@ -1194,6 +1362,7 @@ function wrapTextBlock(ctx, text, x, y, maxW, lineH, maxY) {
 function drawServiceScreen() {
   const paint = (canvas, hits) => {
     const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
     hits.length = 0;
     const box = drawRetroShell(ctx, "Service - SIM.EXE");
     const x0 = box.x;
@@ -1208,7 +1377,7 @@ function drawServiceScreen() {
     y =
       wrapTextBlock(
         ctx,
-        "Tap a row to toggle hardware. Random faults (demo) adds rare print or card errors.",
+        "ROW=TOGGLE. RANDOM FAULTS=DEMO ERRS.",
         x0,
         y,
         rowW - 4,
@@ -1247,6 +1416,7 @@ function drawServiceScreen() {
 }
 
 function renderDisplay() {
+  if (popoutCtx) popoutCtx.imageSmoothingEnabled = false;
   if (uiPage === "service") drawServiceScreen();
   else {
     const s = engine.snapshot;
@@ -1262,6 +1432,14 @@ function renderDisplay() {
   }
   screenTexEntry.needsUpdate = true;
   screenTexExit.needsUpdate = true;
+  if (driveHintEl && uiPage !== "patron") {
+    clearDriveHintHideTimer();
+    driveHintEl.classList.add("drive-hint--hidden");
+    driveHintEl.setAttribute("aria-hidden", "true");
+  }
+  if (helpSettingsBtn) {
+    helpSettingsBtn.classList.toggle("help-settings--hidden", uiPage !== "patron");
+  }
 }
 
 function resize() {
@@ -1333,6 +1511,7 @@ function runAction(action) {
     if (action === "close_service") {
       uiPage = "patron";
       renderDisplay();
+      showDriveHintPanelAndSchedule();
       return;
     }
     if (action === "toggle_db") {
@@ -1353,6 +1532,7 @@ function runAction(action) {
       engine.triggerCriticalFault();
       closeKioskPopout();
       uiPage = "patron";
+      showDriveHintPanelAndSchedule();
     }
     renderDisplay();
     return;
@@ -1396,14 +1576,6 @@ function runAction(action) {
     case "pay_bad":
       void engine.pay({ method: "card", approve: false });
       break;
-    case "done": {
-      parkCelebrationShown = false;
-      engine.acknowledgeExit();
-      uiPage = "patron";
-      resetPatronSimVisual();
-      renderDisplay();
-      break;
-    }
     case "reset":
       engine.resetAfterFault();
       resetPatronSimVisual();
@@ -1416,6 +1588,9 @@ function runAction(action) {
 let ptrDown = null;
 /** After tapping a kiosk mesh, the same gesture still fires `click` on `#c`; ignore one dismiss so the pop-out can stay open. */
 let skipNextPopoutDismissClick = false;
+canvas.addEventListener("contextmenu", (e) => {
+  if (manualCameraView) e.preventDefault();
+});
 canvas.addEventListener("pointerdown", (e) => {
   ptrDown = { x: e.clientX, y: e.clientY, t: performance.now() };
   skipNextPopoutDismissClick = false;
@@ -1462,6 +1637,19 @@ canvas.addEventListener("pointerup", (e) => {
 
 renderDisplay();
 
+helpSettingsBtn?.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  if (uiPage !== "patron" || !driveHintEl) return;
+  if (driveHintEl.classList.contains("drive-hint--hidden")) {
+    showDriveHintPanelAndSchedule();
+  } else {
+    hideDriveHintPanel();
+  }
+});
+
+scheduleDriveHintAutoHide();
+
 if (popoutCanvasEl) {
   popoutCanvasEl.addEventListener("pointerup", (e) => {
     if (e.button !== 0 && e.button !== undefined) return;
@@ -1478,8 +1666,9 @@ document.addEventListener("click", (e) => {
     skipNextPopoutDismissClick = false;
     return;
   }
-  if (!popoutSource || !popoutEl || popoutEl.classList.contains("kiosk-popout--hidden")) return;
   const t = /** @type {Node | null} */ (e.target);
+  if (helpSettingsBtn && t && helpSettingsBtn.contains(t)) return;
+  if (!popoutSource || !popoutEl || popoutEl.classList.contains("kiosk-popout--hidden")) return;
   if (t && popoutEl.contains(t)) return;
   closeKioskPopout();
 });
@@ -1497,6 +1686,20 @@ window.addEventListener("keyup", (e) => {
   if (e.key in keyDrive) keyDrive[/** @type {keyof typeof keyDrive} */ (e.key)] = false;
 });
 
+/** After exit drive-out: clear UI / pop-outs only — cars stay where they are so another vehicle can exit or the patron can re-enter. */
+function resetPatronUiAfterExitDone() {
+  entryTicketPulled = false;
+  parkCelebrationShown = false;
+  hideParkCelebration();
+  closeKioskPopout();
+  setManualCameraView(false);
+  /** Match current zones so we do not treat “still in exit staging” as a new arrival and reopen the exit pop-out. */
+  prevAtEntryZone = anyDriveableCarInEntryZone();
+  prevAtExitStaging = !!(selectedDriveGroup && carInAnyExitStaging(selectedDriveGroup));
+  playerAtEntryBooth = prevAtEntryZone;
+}
+
+/** Full demo reset (fault / staff reset): patron car back to spawn, selection = patron car. */
 function resetPatronSimVisual() {
   playerAtEntryBooth = false;
   prevAtEntryZone = false;
@@ -1509,6 +1712,7 @@ function resetPatronSimVisual() {
   playerCarGroup.rotation.y = wpPatronStart.ry;
   playerCar.winL.position.y = playerCar.winR.position.y = 0.04;
   closeKioskPopout();
+  setManualCameraView(false);
 }
 
 function updateSim() {
@@ -1526,6 +1730,12 @@ function updateSim() {
     }
     renderDisplay();
   }
+
+  if (s.flow === "EXIT_DONE" && anyDriveablePastExitDriveOutLine()) {
+    engine.acknowledgeExit();
+    resetPatronUiAfterExitDone();
+    renderDisplay();
+  }
 }
 
 let lastSimFrameT = performance.now();
@@ -1540,7 +1750,11 @@ function tick(t) {
   updateKeyboardDrive(dt);
   updateSim();
   syncPopoutsToDriveZones();
-  applyChaseCamera();
+  if (manualCameraView) {
+    controls.update();
+  } else {
+    applyChaseCamera();
+  }
   stars.rotation.y = t * 0.000012;
   kioskEntryGroup.rotation.y = ENTR_YAW + Math.sin(t * 0.00022) * 0.012;
   kioskExitGroup.rotation.y = EXIT_YAW + Math.sin(t * 0.00019 + 0.4) * 0.012;
